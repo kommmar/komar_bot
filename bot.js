@@ -30,6 +30,14 @@ const bot = new TelegramBot(TOKEN, { polling: true });
   }
 })();
 bot.getMe().then(me => console.log(`✅ Bot @${me.username}`));
+// --- Защита от двойного запуска (Render + локальный, или двойной deploy) ---
+bot.getUpdates({ limit: 1 }).catch(err => {
+  if (String(err.message).includes("409")) {
+    console.error("❌ Обнаружен другой активный экземпляр бота. Завершение...");
+    process.exit(0);
+  }
+});
+
 
 let restarting = false;
 bot.on("polling_error", async (err) => {
