@@ -1,0 +1,800 @@
+// bot.js (ФИНАЛЬНАЯ ВЕРСИЯ С БЕЗОПАСНОСТЬЮ MULTI-USER И ФИКСОМ RealTime)
+
+import TelegramBot from "node-telegram-bot-api";
+import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { GLOBAL, DEFAULTS, MODULE_NAMES } from "./modules/config.js"; 
+import { startWsConnections, setGlobalDataHandler } from './modules/wsManager.js'; 
+import { // <<< ИСПРАВЛЕННЫЙ ИМПОРТ
+    startScanner, stopScanner, handleKlineUpdate, startCacheUpdater, stopCacheUpdater 
+} from './modules/scannerEngine.js'; 
+
+dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const ACCESS_SECRET_KEY = process.env.ACCESS_SECRET_KEY; 
+
+const TOKEN = process.env.BOT_TOKEN;
+if (!TOKEN) {
+  console.error("❌ BOT_TOKEN не найден в .env. Проверьте файл.");
+  process.exit(1);
+}
+
+const bot = new TelegramBot(TOKEN, { polling: true });
+
+// === УТИЛИТЫ ФОРМАТИРОВАНИЯ ===
+
+function formatCash(v){
+  if (v == null || isNaN(v)) return "0$";
+  const num = Number(v);
+  const a = Math.abs(num);
+  if (a >= 1e9) return (num/1e9).toFixed(1)+"B$";
+  if (a >= 1e6) return (num/1e6).toFixed(1)+"M$";
+  if (a >= 1e3) return (num/1e3).toFixed(1)+"K$";
+  return num.toFixed(0)+"$"; 
+}
+
+function fmtPct(n){
+  if (n == null || isNaN(n)) return "—";
+  const s = Number(n);
+  return (s >= 0 ? "+" : "") + s.toFixed(2) + "%";
+}
+
+function formatCompactUsd(usd) {
+    if (usd == null || isNaN(usd) || usd === 0) return '';
+    const num = Number(usd);
+    const absNum = Math.abs(num);
+    
+    if (absNum >= 1e9) return `(${(num/1e9).toFixed(2)}B)`;
+    if (absNum >= 1e6) return `(${(num/1e6).toFixed(2)}M)`;
+    if (absNum >= 1e3) return `(${(num/1e3).toFixed(1)}K)`;
+    return `(${(num).toFixed(0)}$)`; 
+}
+
+
+const DATA = path.join(__dirname, "data");
+if (!fs.existsSync(DATA)) fs.mkdirSync(DATA, { recursive: true });
+
+function userPath(id){ return path.join(DATA, `${id}.json`); }
+
+function baseUser(){
+  return {
+    scanning:false,
+    hardStop:false,
+    exchanges:[...DEFAULTS.exchanges],
+    modules:[...DEFAULTS.modules],
+    perModuleTF:{...DEFAULTS.perModuleTF},
+    sp:{...DEFAULTS.sp},
+    pd:{...DEFAULTS.pd},
+    div:{...DEFAULTS.div},
+    minVolumeUsd: DEFAULTS.minVolumeUsd ?? 10_000_000,
+    cooldownSec: DEFAULTS.cooldownSec ?? 1800, 
+    _authorized: false,
+    _menuMsg:null,
+    _askMsg:null,
+    _await:null,
+    analysisMode: DEFAULTS.analysisMode || 'Closed'
+  };
+}
+
+function loadUser(id){
+  const p = userPath(id);
+  if (!fs.existsSync(p)) return baseUser();
+  try{
+    const u = JSON.parse(fs.readFileSync(p,"utf-8"));
+    const merged = { ...baseUser(), ...u };
+    
+    for (const key of ['sp', 'pd', 'div']) { 
+        merged[key] = { ...DEFAULTS[key], ...(u[key] || {}) };
+    }
+    
+    merged.id = id;
+    return merged;
+  }catch(e){
+    return baseUser();
+  }
+}
+function saveUser(id, u){
+  try{ fs.writeFileSync(userPath(id), JSON.stringify(u,null,2)); }catch(e){
+    console.error(`[❌ Save Error] Не удалось сохранить файл ${id}.json:`, e.message);
+  }
+}
+
+async function deleteMessageSafe(cid, mid){
+    if (!mid) return;
+    try {
+        await bot.deleteMessage(cid, mid);
+    } catch(e) {
+        
+    }
+}
+
+async function editOrSend(cid, msgId, text, kb){
+  try {
+    if (msgId){
+      return await bot.editMessageText(text, {
+        chat_id: cid, message_id: msgId, parse_mode: "HTML",
+        reply_markup: { inline_keyboard: kb }
+      });
+    }
+  }catch(e){
+    
+  }
+  return await bot.sendMessage(cid, text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: kb }
+  });
+}
+
+// Глобальная Map для отслеживания состояния сканера
+if(!global._activeScans) global._activeScans = new Map();
+
+function statusMsg(u){
+  const scanData = global._activeScans.get(u.id);
+  const isRunning = u.scanning && scanData;
+
+  const mods = (u.modules||[])
+    .map(code => `${MODULE_NAMES[code]} (${u.perModuleTF?.[code]||"5m"})
+    `.trim())
+    .join("\n") || "—";
+  const ex = (u.exchanges||[]).map(x=>x.toUpperCase()).join(" + ") || "—";
+  const volDisplay = formatCash(u.minVolumeUsd).replace('$', ''); 
+  const cdMin = Math.floor((u.cooldownSec || 1800) / 60);
+  
+  const modeDisplay = u.analysisMode === 'RealTime' ? '⚡ RealTime' : '⏱ Closed';
+
+  const scanDetails = isRunning ? 
+    `\nАктивные пары:\nBinance: ${scanData.bin || 0}\nBybit: ${scanData.byb || 0}\nАктивные ТФ: ${scanData.activeTFs.join(', ')}` : '';
+
+  return `📟 <b>Статус</b>
+Запущен: <b>${isRunning?"Да":"Нет"}</b>
+Режим: <b>${modeDisplay}</b>
+Биржи: <b>${ex}</b>
+Фильтр объёма: <b>≥ ${volDisplay}</b>
+Антиспам (КД): <b>${cdMin} мин</b>
+${scanDetails}
+
+Модули:
+${mods}`;
+}
+
+// =========================================================
+// --- ФУНКЦИИ МЕНЮ ---
+// =========================================================
+
+async function welcomeMenu(cid) {
+  const u = loadUser(cid);
+
+  if (!u._authorized && ACCESS_SECRET_KEY) {
+      const text = `
+👋 <b>Smart Trader Bot</b>
+
+Для доступа, пожалуйста, введите секретный ключ:
+`;
+      u._await = { f: "accessKey" }; 
+      saveUser(cid, u);
+      
+      const res = await bot.sendMessage(cid, text, { parse_mode: "HTML" });
+      u._askMsg = res.message_id; 
+      saveUser(cid, u);
+      return;
+  }
+  
+  return showInfoMenu(cid);
+}
+
+async function showInfoMenu(cid) {
+  const text = `
+🤖 <b>ОЗНАКОМИТЕЛЬНОЕ МЕНЮ СКАНИРОВАНИЯ</b>
+
+Ваш бот анализирует рынок фьючерсов, объединяя три ключевых метрики (Цена, OI, CVD) для поиска аномалий.
+
+<b>🚀 КАК РАБОТАЮТ МОДУЛИ:</b>
+
+⚡️ <b>Smart Trader Bot</b>
+    Ищет ранние признаки агрессивного входа по резкому скачку OI (Open Interest), подтвержденному сильным движением цены. Использует низкие ТФ.
+
+🚀 <b>Памп/Дамп (PD)</b>
+    Ищет сформированный, мощный импульс: большая свеча + аномальный объем (Vol×SMA) + значительный денежный поток (CVD).
+
+📈 <b>Дивергенция (DIV)</b>
+    Ищет расхождение между ценой и индикатором (RSI). Использует OI/CVD как вторичный фильтр, чтобы убедиться, что текущий тренд ослабевает.
+
+---
+`;
+
+    const kb = [[
+        { text: "⚙️ Перейти к настройкам", callback_data: "go_auth_or_main" }
+    ]];
+
+    const res = await editOrSend(cid, loadUser(cid)._menuMsg, text, kb);
+    if (res?.message_id) { 
+        const u2 = loadUser(cid); 
+        u2._menuMsg = res.message_id; 
+        saveUser(cid, u2); 
+    }
+}
+
+
+async function mainMenu(cid){
+  const u = loadUser(cid);
+  const volDisplay = formatCash(u.minVolumeUsd).replace('$', ''); 
+  const cdMin = Math.floor((u.cooldownSec || 1800) / 60);
+  const mode = u.analysisMode || 'Closed';
+  const modeDisplay = mode === 'RealTime' ? '⚡️ RealTime' : '⏱️ Closed';
+
+  const kb = [
+    [{ text:"🤖 Модули", callback_data:"mods" }, { text:"⏱ Таймфреймы", callback_data:"tfmod" }],
+    [{ text:"🛠 Настройки Модулей", callback_data:"settings" }],
+    [{ text: `Режим Анализа: ${modeDisplay}`, callback_data: "toggle_mode_analysis" }],
+    [{ text:"🏦 Биржи", callback_data:"ex" }, { text:`⏳ КД: ${cdMin} мин`, callback_data:"set_cooldown" }],
+    [{ text:`📊 Объём ≥ ${volDisplay}`, callback_data:"set_volume" }],
+    [{ text:"▶️ Запуск", callback_data:"start" }, { text:"⛔️ Стоп", callback_data:"stop" }],
+    [{ text:"📟 Статус", callback_data:"status" }]
+  ];
+  const res = await editOrSend(cid, loadUser(cid)._menuMsg, "⚙️ <b>Главное меню</b>", kb);
+  if (res?.message_id){ const u2=loadUser(cid); u2._menuMsg=res.message_id; saveUser(cid,u2); }
+}
+
+async function modsMenu(cid){
+  const u = loadUser(cid);
+  const availableModules = Object.keys(MODULE_NAMES).filter(code => ['sp', 'pd', 'div'].includes(code)); 
+  const kb = availableModules.map(code => [{
+    text: `${u.modules.includes(code)?"✅":"☑️"} ${MODULE_NAMES[code]}`,
+    callback_data: "mod_"+code
+  }]);
+  kb.push([{ text:"⬅️ Назад", callback_data:"back" }]);
+  const r = await editOrSend(cid,u._menuMsg,"Выберите активные модули:",kb);
+  if(r?.message_id){u._menuMsg=r.message_id;saveUser(cid,u);}
+}
+
+async function tfModulesMenu(cid){
+  const u = loadUser(cid);
+  const availableModules = Object.keys(MODULE_NAMES).filter(code => ['sp', 'pd', 'div'].includes(code));
+  const kb = availableModules.map(code => [{
+    text: `${MODULE_NAMES[code]} (${u.perModuleTF?.[code]||"5m"})`,
+    callback_data: "tftoggle_"+code
+  }]);
+  kb.push([{ text:"⬅️ Назад", callback_data:"back" }]);
+  const r = await editOrSend(cid,u._menuMsg,"⏱ Выберите таймфрейм для каждого модуля:",kb);
+  if(r?.message_id){u._menuMsg=r.message_id;saveUser(cid,u);}
+}
+
+async function settingsMenu(cid){
+  const u = loadUser(cid);
+  const availableModules = Object.keys(MODULE_NAMES).filter(code => ['sp', 'pd', 'div'].includes(code));
+  const kb = availableModules.map(code => [{
+    text: MODULE_NAMES[code], 
+    callback_data: "set_"+code 
+  }]);
+  kb.push([{ text:"⬅️ Назад", callback_data:"back" }]);
+  const r = await editOrSend(cid, u._menuMsg, "🛠 Настройки модулей:", kb);
+  if (r?.message_id){ u._menuMsg=r.message_id; saveUser(cid,u); }
+}
+
+async function exMenu(cid){ 
+  const u = loadUser(cid);
+  const availableExchanges = ["binance", "bybit"];
+  const kb = availableExchanges.map(ex => [{
+    text: `${u.exchanges.includes(ex) ? "✅" : "☑️"} ${ex.toUpperCase()}`,
+    callback_data: "toggle_ex_" + ex
+  }]);
+  kb.push([{ text:"⬅️ Назад", callback_data:"back" }]);
+  return editOrSend(cid, u._menuMsg, "Выберите активные биржи:", kb);
+}
+
+// === Детальные меню настроек ===
+
+async function showSPMenu(cid){
+  const u = loadUser(cid);
+  const set = u.sp;
+  
+  const kb = [
+    [{ text:`Мин. OI % LONG: ${Number(set.oiPlusPct).toFixed(2)}%`, callback_data:"sp_oiplus" }],
+    // Кнопка CVD USD удалена из меню
+    [{ text:`⬅️ Назад`, callback_data:"settings" }]
+  ];
+  
+  return editOrSend(cid, u._menuMsg, "⚙️ <b>Smart Pump</b> (Резкий рост OI)", kb);
+}
+
+async function showPDMenu(cid){
+  const u = loadUser(cid);
+  const set = u.pd;
+  const kb = [
+    [{ text:`Мин. Тело %: ${Number(set.minBodyPct).toFixed(2)}%`, callback_data:"pd_body" }],
+    [{ text:`Мин. Vol×SMA20: ${Number(set.minVolX).toFixed(2)}×`, callback_data:"pd_volx" }],
+    [{ text:`Мин. OI %: ${Number(set.oiPct).toFixed(2)}%`, callback_data:"pd_oipct" }],
+    [{ text:`Мин. CVD USD: ${formatCash(set.oiUsdMin)}`, callback_data:"pd_oiminusd" }],
+    [{ text:"⬅️ Назад", callback_data:"settings" }]
+  ];
+  return editOrSend(cid, u._menuMsg, "⚙️ <b>Pump/Dump</b> (Тело + Объём + OI)", kb);
+}
+
+async function showDIVMenu(cid){
+  const u = loadUser(cid);
+  const set = u.div;
+  const modeString = String(set.mode || 'strict');
+  const modeDisplay = modeString.toUpperCase() === 'STRICT' ? 'СТРОГИЙ' : 'СВОБОДНЫЙ';
+
+  const kb = [
+    [{ text:`RSI Период: ${Number(set.rsiPeriod)}`, callback_data:"div_rsi" }],
+    [{ text:`Мин. Разница RSI: ${Number(set.rsiMinDiff)}`, callback_data:"div_diff" }], 
+    [{ text:`MACD Fast: ${Number(set.macdFast)}`, callback_data:"div_fast" }, { text:`MACD Slow: ${Number(set.macdSlow)}`, callback_data:"div_slow" }],
+    [{ text:`MACD Signal: ${Number(set.macdSignal)}`, callback_data:"div_signal" }],
+    [{ text:`Режим: ${modeDisplay}`, callback_data:"div_toggle_mode" }], 
+    [{ text:"⬅️ Назад", callback_data:"settings" }]
+  ];
+  return editOrSend(cid, u._menuMsg, "⚙️ <b>Divergence</b> (Дивергенция)", kb);
+}
+// -----------------------------------------------------------------
+
+
+// --- Форматирование сигнала для Telegram ---
+
+function formatSignalForTg(r){
+    const arrow = r.side === 'Лонг' ? '🟢' : '🔴';
+    const kind = r.kind || r.reason;
+    const tf = r.detail?.signalTf || 'N/A';
+    
+    const mode = r.detail?.signalMode || 'Closed';
+    const modeEmoji = mode === 'RealTime' ? '⚡️' : '⏱️';
+    
+    const oiPct = r.detail?.oi != null ? fmtPct(r.detail.oi) : '—';
+    const cvd = r.detail?.cvd != null ? formatCash(r.detail.cvd) : '—';
+    
+    let oiElement = oiPct;
+    if (r.detail?.deltaOIUsd != null) {
+        const oiUsdCompact = formatCompactUsd(r.detail.deltaOIUsd);
+        if (oiPct !== '—' && oiUsdCompact) {
+            oiElement = `${oiPct} ${oiUsdCompact}`;
+        } else if (oiUsdCompact) {
+            oiElement = oiUsdCompact;
+        }
+    }
+    
+    let extraDetails = [];
+    let headerEmoji = '🚨';
+    let cvdDisplay = cvd;
+    let mainMetrics = [];
+
+    if (kind.includes('Smart Pump')) {
+        headerEmoji = '⚡️';
+        const pricePct = r.detail?.priceChangePct ? fmtPct(r.detail.priceChangePct) : '—';
+        const spCount = r.detail?.smartPumpCount24h ?? '—';
+        
+        mainMetrics.push(`📈 Δ% Цены: ${pricePct}`);
+        extraDetails.push(`*Повторы 24ч:* ${spCount}×`);
+    }
+    else if (kind.includes('PUMP') || kind.includes('DUMP')) {
+        headerEmoji = '🚀';
+        const pricePct = r.detail?.priceChangePct ? fmtPct(r.detail.priceChangePct) : '—';
+        mainMetrics.push(`📈 Δ% Цены: ${pricePct}`);
+    }
+    else if (kind.includes('Дивергенция')) {
+        headerEmoji = '📈';
+        const rsiVal = r.detail.rNow.toFixed(0);
+        const rsiPrev = r.detail.rPrev.toFixed(0);
+        const volMult = r.detail?.volMult ? r.detail.volMult.toFixed(1) : '—';
+        
+        const rsiDiff = r.detail.rNow - r.detail.rPrev;
+        const divType = r.side === 'Лонг' ? 'Бычья (Bullish)' : 'Медвежья (Bearish)';
+        const rsiTrend = r.side === 'Лонг' ? `(${rsiVal} > ${rsiPrev})` : `(${rsiVal} < ${rsiPrev})`;
+        const rsiZone = r.side === 'Лонг' ? (rsiVal < 30 ? '✅ OS (<30)' : '❌') : (rsiVal > 70 ? '✅ OB (>70)' : '❌');
+        
+        extraDetails.push(`\n*Тип Дивер:* ${divType}`);
+        extraDetails.push(`*RSI:* ${rsiVal} ${rsiTrend} (Δ${rsiDiff.toFixed(0)})`);
+        extraDetails.push(`*Зона RSI:* ${rsiZone}`); 
+        extraDetails.push(`*Vol×:* ${volMult}`);
+        
+        if (r.detail.macdNow && r.detail.signalNow) {
+            
+            if (r.reason.includes('MACD Confirmed')) {
+                const isBull = r.side === 'Лонг';
+                const action = isBull ? 'пересекла снизу вверх' : 'пересекла сверху вниз';
+                const zoneText = isBull ? 'в отрицательной зоне (≤0)' : 'в положительной зоне (≥0)';
+                extraDetails.push(`*MACD Подтверждение (S3):*`);
+                extraDetails.push(`  - Быстрая линия ${action} сигнальную.`);
+                extraDetails.push(`  - Пересечение произошло ${zoneText}.`); 
+            } else if (r.reason.includes('CVD Confirmed' || r.reason.includes('OI Confirmed'))) {
+                extraDetails.push(`*Доп. Подтверждение (S2):* Денежный поток или OI подтверждают разворот.`);
+            }
+        }
+    }
+
+    const metricsLine = mainMetrics.join(' | ');
+
+    return `
+${headerEmoji} *${kind}* • ${r.exchange}
+*${r.symbol}* • ${tf} | Режим: ${modeEmoji} ${mode} ${arrow}
+---
+*Цена:* ${r.price.toFixed(r.price > 100 ? 2 : 4)}$
+${metricsLine ? metricsLine : ''}
+---
+*💰 OI Δ:* ${oiElement}
+*💵 CVD Δ:* ${cvdDisplay}${extraDetails.length > 0 ? '\n' + extraDetails.join('\n') : ''}
+    
+*Время:* ${new Date(r.ts).toLocaleTimeString()}`.trim();
+}
+
+/* Scanner Logic - НОВАЯ ЛОГИКА WS */
+
+const onSignal = async (sig) => {
+    const userIds = Array.from(global._activeScans.keys()); 
+    await Promise.all(userIds.map(async (cid) => {
+        const u = loadUser(cid);
+        if(u.scanning && global._activeScans.has(cid)){
+             await bot.sendMessage(cid, formatSignalForTg(sig), { parse_mode: "Markdown" });
+        }
+    }));
+};
+
+// >>> NEW/FIXED: ЛОГИКА handleWsData ДЛЯ RealTime/Closed
+function handleWsData(exchange, data) {
+    let newKlineData = null;
+    let symbol = null;
+    let tf = null;
+    let isClosed = false; 
+    
+    let cid = global._activeScans.keys().next().value; 
+
+    if (!cid) return;
+
+    const u = loadUser(cid);
+    const mode = u.analysisMode || 'Closed';
+
+    if (exchange === 'binance' && data.e === 'kline') {
+        newKlineData = data.k;
+        symbol = data.k.s;
+        tf = data.k.i;
+        isClosed = data.k.x; 
+    } else if (exchange === 'bybit' && data.topic && data.topic.startsWith('kline') && data.data && data.data[0]) {
+        const parts = data.topic.split('.');
+        tf = parts[1];
+        symbol = parts[2];
+        newKlineData = data.data[0];
+        isClosed = data.data[0].confirm; 
+    }
+    
+    if (newKlineData && symbol && tf) {
+        
+        // 1. Аналіз ЗАКРИТОЇ свічки (Надійний: isClosed = true, isRealTime = false)
+        if (isClosed) {
+            handleKlineUpdate(exchange, symbol, tf, newKlineData, true, false, u); 
+            return; 
+        }
+        
+        // 2. Аналіз РЕАЛЬНОГО ЧАСУ (Швидкий: isClosed = false, isRealTime = true)
+        if (mode === 'RealTime') {
+            handleKlineUpdate(exchange, symbol, tf, newKlineData, false, true, u); 
+        }
+        
+        // 3. Базове оновлення (для Closed Mode)
+        if (mode === 'Closed') {
+             // Просто оновлюємо свічку в кеші, не запускаючи аналіз
+             handleKlineUpdate(exchange, symbol, tf, newKlineData, false, false, u); 
+        }
+    }
+}
+// ------------------------------------------------------------------
+
+/* Value input */
+
+bot.on("message", async (msg)=>{
+  try{
+    const cid=msg.chat.id;
+    const mid=msg.message_id;
+    const u=loadUser(cid);
+    
+    if (u._await && u._await.f === "accessKey") {
+        const inputKey = String(msg.text || "").trim();
+        await deleteMessageSafe(cid, mid);
+        await deleteMessageSafe(cid, u._askMsg);
+
+        u._askMsg = null;
+        u._await = null;
+        
+        if (inputKey === ACCESS_SECRET_KEY) {
+            u._authorized = true;
+            saveUser(cid, u);
+            bot.sendMessage(cid, "✅ Доступ разрешен! Загружаю главное меню.", { parse_mode: "HTML" });
+            return mainMenu(cid);
+        } else {
+            saveUser(cid, u);
+            return bot.sendMessage(cid, "❌ Неверный секретный ключ. Попробуйте еще раз или используйте /start.");
+        }
+    }
+
+    if(!u._await) return;
+
+    const raw=String(msg.text||"").trim();
+    const val=parseFloat(raw.replace(/[^0-9.\-]/g,""));
+    
+    if(!isFinite(val) || val < 0){
+      await deleteMessageSafe(cid, mid);
+      await deleteMessageSafe(cid, u._askMsg);
+      mainMenu(cid); 
+      return bot.sendMessage(cid,"❌ Введите корректное положительное число.");
+    }
+    
+    const {m, f} = u._await;
+
+    if(f==="minVolumeUsd"){
+      let x = val;
+      if(x < 1e3 && x > 0) x = x * 1000000;
+      u.minVolumeUsd = Math.max(1000000, Math.round(x));
+    } 
+    else if (f === "cooldownSec") {
+        u.cooldownSec = Math.max(60, Math.round(val));
+    } 
+    else if (m && f){
+      u[m][f]=val;
+    }
+
+    await deleteMessageSafe(cid, u._askMsg); 
+    await deleteMessageSafe(cid, mid); 
+
+    u._askMsg=null;u._await=null;saveUser(cid,u);
+    
+    switch(f){ 
+        case "minVolumeUsd":
+        case "cooldownSec":
+            return mainMenu(cid);
+        default:
+            switch(m){
+                case "sp": 
+                    if (f === "minCVDUsd" || f === "oiPlusPct") return showSPMenu(cid); 
+                    return showSPMenu(cid);
+                case "pd": return showPDMenu(cid);
+                case "div": return showDIVMenu(cid);
+                default: return mainMenu(cid); 
+            }
+    }
+  }catch(e){
+    mainMenu(msg.chat.id); 
+  }
+});
+
+/* Callbacks */
+
+bot.on("callback_query",async(q)=>{
+  const cid=q.message.chat.id;
+  const d=q.data;
+  const u=loadUser(cid);
+  
+  if (!u._authorized && ACCESS_SECRET_KEY && d !== "go_auth_or_main") {
+      return bot.sendMessage(cid, "❌ Сначала введите секретный ключ.", { parse_mode: "HTML" });
+  }
+
+  await deleteMessageSafe(cid, u._askMsg);
+  u._askMsg = null;
+  u._await = null;
+
+  u._menuMsg=q.message.message_id;saveUser(cid,u);
+
+  const ask=async(field,m,msg)=>{
+    u._await={m,f:field};saveUser(cid,u);
+    const m2=await bot.sendMessage(cid,msg,{parse_mode:"HTML"});
+    u._askMsg=m2.message_id;saveUser(cid,u);
+  };
+  
+  const map={
+    // Smart Pump (SP)
+    sp_oiplus:      ()=>ask("oiPlusPct","sp","Введите OI+ % (Мин. OI %):"),
+    //sp_cvd: УДАЛЕНА ИЗ MAP
+    // Pump/Dump (PD)
+    pd_body:        ()=>ask("minBodyPct","pd","Мин. Тело %:"),
+    pd_volx:        ()=>ask("minVolX","pd","Мин. Vol×SMA20:"),
+    pd_oipct:       ()=>ask("oiPct","pd","Мин. OI %:"), 
+    pd_oiminusd:    ()=>ask("oiUsdMin","pd","Мин. CVD USD:"), 
+    // Divergence (DIV)
+    div_rsi:        ()=>ask("rsiPeriod","div","RSI Период:"),
+    div_diff:       ()=>ask("rsiMinDiff","div","Мин. разница RSI:"), 
+    div_fast:       ()=>ask("macdFast","div","MACD Fast Период:"), 
+    div_slow:       ()=>ask("macdSlow","div","MACD Slow Период:"), 
+    div_signal:     ()=>ask("macdSignal","div","MACD Signal Период:"), 
+    "div_toggle_mode": async()=>{
+        const currentMode = String(u.div.mode || 'strict').toUpperCase();
+        u.div.mode = (currentMode === 'STRICT' || currentMode === 'СТРОГИЙ') ? 'relaxed' : 'strict';
+        saveUser(cid, u);
+        return showDIVMenu(cid);
+    },
+    // Глобальные настройки
+    set_volume:     ()=>ask("minVolumeUsd", null, `Введите минимальный объём USD (например, 10000000 или 10M). Текущее: ${formatCash(u.minVolumeUsd)}`),
+    set_cooldown:   ()=>ask("cooldownSec", null, `Введите Антиспам КД (сек). Текущее: ${u.cooldownSec} сек`),
+  };
+
+  if(map[d])return map[d]();
+
+  if(d==="go_auth_or_main"){
+      const isAuthRequired = ACCESS_SECRET_KEY && !u._authorized;
+      
+      if (isAuthRequired) {
+          const text = `Для доступа, пожалуйста, введите секретный ключ:`;
+          u._await = { f: "accessKey" }; 
+          saveUser(cid, u);
+          
+          const res = await bot.sendMessage(cid, text, { parse_mode: "HTML" });
+          u._askMsg = res.message_id; 
+          saveUser(cid, u);
+          return;
+      }
+      return mainMenu(cid); 
+  }
+  
+  if(d==="toggle_mode_analysis"){
+      const currentMode = u.analysisMode || 'Closed';
+      u.analysisMode = (currentMode === 'Closed') ? 'RealTime' : 'Closed';
+      saveUser(cid, u);
+      return mainMenu(cid);
+  }
+  
+  if(d==="go_main")return mainMenu(cid);
+  if(d==="mods")return modsMenu(cid);
+  if(d==="tfmod")return tfModulesMenu(cid);
+  if(d==="settings")return settingsMenu(cid);
+  if(d==="back")return mainMenu(cid);
+  if(d==="ex")return exMenu(cid); 
+  if(d==="status")return bot.sendMessage(cid,statusMsg(u),{parse_mode:"HTML"});
+  
+  if (d.startsWith("toggle_ex_")){
+    const exCode = d.replace("toggle_ex_","");
+    const s = new Set(u.exchanges);
+    s.has(exCode) ? s.delete(exCode) : s.add(exCode);
+    u.exchanges = [...s]; saveUser(cid,u);
+    return exMenu(cid);
+  }
+
+  if(d.startsWith("mod_")){
+    const code = d.replace("mod_","");
+    const s=new Set(u.modules); s.has(code)?s.delete(code):s.add(code);
+    u.modules=[...s];saveUser(cid,u);
+    return modsMenu(cid);
+  }
+
+  if(d.startsWith("tftoggle_")){
+    const code = d.replace("tftoggle_","");
+    const validTfs = ["5m", "15m", "1h", "4h"];
+    const currentTf = u.perModuleTF[code] || "5m";
+    const currentIndex = validTfs.indexOf(currentTf);
+    const nextIndex = (currentIndex + 1) % validTfs.length;
+    u.perModuleTF[code] = validTfs[nextIndex];
+
+    saveUser(cid,u);
+    return tfModulesMenu(cid);
+  }
+
+  if(d.startsWith("set_")){
+    const code = d.replace("set_","");
+    switch(code){
+      case "sp": return showSPMenu(cid);
+      case "pd": return showPDMenu(cid);
+      case "div": return showDIVMenu(cid);
+      default: return settingsMenu(cid);
+    }
+  }
+
+  if(d==="start"){
+    if(global._activeScans.has(cid)){
+         await bot.sendMessage(cid, "⚠️ Сканирование уже запущено.");
+         return;
+    }
+    const u2 = loadUser(cid);
+    if(!u2.modules || u2.modules.length===0){
+        await bot.sendMessage(cid, "❌ Выберите хотя бы один модуль сканирования.");
+        return;
+    }
+    if(!u2.exchanges || u2.exchanges.length===0){
+        await bot.sendMessage(cid, "❌ Выберите хотя бы одну биржу.");
+        return;
+    }
+    
+    u2.scanning=true;u2.hardStop=false;saveUser(cid,u2);
+    
+    await bot.sendMessage(cid, `⏳ Запуск сканера... Загрузка истории и подписка на WebSockets. (Оптимизировано)`);
+    
+    setGlobalDataHandler(handleWsData);
+    startWsConnections(); 
+    
+    try {
+        const activeUserIds = Array.from(global._activeScans.keys());
+        if (!activeUserIds.includes(cid)) activeUserIds.push(cid);
+
+        const { bin, byb, activeTFs, symbols } = await startScanner(u2, activeUserIds, cid, onSignal);
+        
+        startCacheUpdater(); 
+        
+        global._activeScans.set(cid, {
+            bin,
+            byb,
+            activeTFs,
+        });
+        
+        const volM=(u2.minVolumeUsd/1e6).toFixed(1);
+
+        await bot.sendMessage(cid,`✅ Сканер запущен и подписан на обновления.
+Биржи: Binance (${bin} пар), Bybit (${byb} пар)
+Активные ТФ: ${activeTFs.join(', ')}
+📊 Фильтр: Vol ≥ $${volM}M`);
+    } catch (e) {
+        console.error("Start scanner error:", e.message);
+        u2.scanning=false;u2.hardStop=true;saveUser(cid,u2);
+        await bot.sendMessage(cid, `❌ Ошибка при запуске: ${e.message}. Проверьте логи.`);
+    }
+
+    return;
+  }
+
+  if(d==="stop"){
+    if(!global._activeScans.has(cid)){
+        await bot.sendMessage(cid, "🛑 Сканер не был запущен.");
+        const u2 = loadUser(cid);
+        u2.scanning=false;u2.hardStop=true;saveUser(cid,u2);
+        return;
+    }
+    
+    const u2 = loadUser(cid);
+    u2.scanning=false;u2.hardStop=true;saveUser(cid,u2);
+    
+    const { bin, byb } = global._activeScans.get(cid);
+    
+    await stopScanner(u2, cid); 
+    
+    global._activeScans.delete(cid); 
+
+    stopCacheUpdater(); 
+    
+    await bot.sendMessage(cid,"🛑 Сканирование остановлено. Отписка от WebSockets выполнена.");
+    return bot.sendMessage(cid, `📊 Binance:${bin} | Bybit:${byb}`);
+  }
+});
+
+/* /start command */
+
+bot.onText(/\/start/, async msg=>{
+  const cid=msg.chat.id;
+  const u=loadUser(cid);
+  u.scanning=false;u.hardStop=false;
+  
+  if (!u._authorized) {
+      u._authorized = false; 
+  }
+
+  saveUser(cid,u);
+  return welcomeMenu(cid);
+});
+
+bot.onText(/\/menu/, async msg => {
+    const cid = msg.chat.id;
+    const u = loadUser(cid);
+    if (!u._authorized && ACCESS_SECRET_KEY) {
+        return welcomeMenu(cid);
+    }
+    return mainMenu(cid);
+});
+
+bot.onText(/\/status/, async msg => {
+    const cid = msg.chat.id;
+    const u = loadUser(cid);
+    if (!u._authorized && ACCESS_SECRET_KEY) {
+        return welcomeMenu(cid);
+    }
+    return bot.sendMessage(cid, statusMsg(u), { parse_mode: "HTML" });
+});
+
+bot.onText(/\/stop/, async msg => {
+    const cid = msg.chat.id;
+    const q = { message: { chat: { id: cid, type: 'private' }, message_id: msg.message_id }, data: "stop" }; 
+    return bot.emit('callback_query', q);
+});
+
+bot.onText(/\/run/, async msg => {
+    const cid = msg.chat.id;
+    const q = { message: { chat: { id: cid, type: 'private' }, message_id: msg.message_id }, data: "start" }; 
+    return bot.emit('callback_query', q);
+});
+
+console.log("✅ Бот готов к работе. Ожидаем команд...");

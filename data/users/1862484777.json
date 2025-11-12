@@ -1,0 +1,41 @@
+{
+  "exchanges": [
+    "binance",
+    "bybit"
+  ],
+  "modules": [
+    "sp",
+    "pd",
+    "div"
+  ],
+  "perModuleTF": {
+    "sp": "5m",
+    "pd": "5m",
+    "div": "5m"
+  },
+  "sp": {
+    "oiPlusPct": 1
+  },
+  "pd": {
+    "oiPct": 1,
+    "cvdUsdMin": 10000,
+    "minBodyPct": 0.3,
+    "minVolX": 2,
+    "oiUsdMin": 100000
+  },
+  "div": {
+    "rsiPeriod": 9,
+    "rsiMinDiff": 2,
+    "rsiOverbought": 65,
+    "rsiOversold": 45,
+    "macdFast": 12,
+    "macdSlow": 26,
+    "macdSignal": 9,
+    "mode": 1
+  },
+  "minVolumeUsd": 25000000,
+  "cooldownSec": 1800,
+  "analysisMode": "Closed",
+  "authorized": true,
+  "realtime": true
+}
