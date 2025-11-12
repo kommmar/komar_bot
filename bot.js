@@ -1,20 +1,25 @@
-// bot.js — ФИНАЛЬНАЯ ВЕРСИЯ (MongoDB + Express для Render)
+// bot.js — ФИНАЛ ДЛЯ RENDER (UA, прокси, снятие webhook, анти-409)
 import "dotenv/config";
 import TelegramBot from "node-telegram-bot-api";
-import express from "express"; // <--- ДОБАВЛЕНО
+import express from "express";
+import { HttpsProxyAgent } from "https-proxy-agent";
 
+// --- твои импорты без изменений
 import { startWsConnections, manageSubscription, unsubscribeAllForUser } from "./modules/wsManager.js";
 import { startCacheUpdater, registerUser, unregisterUser } from "./modules/scannerEngine.js";
 import { DEFAULTS as RAW_DEFAULTS, MODULE_NAMES } from "./modules/config.js";
 import * as binanceApi from "./api/binance.js";
 import * as bybitApi from "./api/bybit.js";
-import { loadUserSettings, saveUserSettings } from "./modules/userManager.js"; 
+import { loadUserSettings, saveUserSettings } from "./modules/userManager.js";
 
+// === ENV ===
 const TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TOKEN) { console.error("❌ TELEGRAM_TOKEN missing"); process.exit(1); }
 const SECRET_WORD = process.env.SECRET_WORD || "komar";
+const PROXY_URL = process.env.PROXY_URL || "";
+const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
 
-// (Весь ваш код userCache, normalizeUser, ensureUser, saveUser... остается без изменений)
+// === USER CACHE/HELPERS (как было) ===
 const userCache = new Map();
 function normalizeUser(u) {
   const D = RAW_DEFAULTS;
@@ -45,19 +50,61 @@ function saveUser(id, u) {
   userCache.set(id, n);
 }
 
-// (Весь ваш код bot, onText, on("message"), on("callback_query"), render... остается без изменений)
-const bot = new TelegramBot(TOKEN, { polling: true });
-bot.getMe().then(me => console.log(`✅ Bot @${me.username}`));
-bot.on("polling_error", (err) => {
-  console.error(`[POLLING ERROR] ${err.code}: ${err.message}`);
-  if (String(err.message).includes("ETIMEDOUT") || err.code === "EFATAL") {
-    bot.stopPolling().finally(() => setTimeout(() => {
-      bot.startPolling().catch(e => console.error("[RESTART FAIL]", e.message));
-    }, 15000));
+// === TELEGRAM BOT (с прокси + снятие webhook) ===
+const bot = new TelegramBot(TOKEN, {
+  polling: true,
+  request: proxyAgent ? { agent: proxyAgent } : undefined, // прокси для Telegram
+});
+
+// сразу убираем webhook, чтобы не было "409 Conflict"
+(async () => {
+  try {
+    await bot.deleteWebHook({ drop_pending_updates: true });
+    console.log("[TG] Webhook disabled. Using polling.");
+  } catch (e) {
+    console.error("[TG] deleteWebHook error:", e?.message || e);
+  }
+})();
+
+bot.getMe().then(me => console.log(`✅ Bot @${me.username}`)).catch(()=>{});
+
+// перезапуск poll’инга при сетевых сбоях и 409
+let restarting = false;
+bot.on("polling_error", async (err) => {
+  const msg = `${err?.code || ""}: ${err?.message || err}`;
+  console.error(`[POLLING ERROR] ${msg}`);
+
+  const text = String(err?.message || "");
+  if (restarting) return;
+
+  // на всякий: чистим webhook и перезапускаем poll’инг
+  if (text.includes("ETELEGRAM: 409") || text.includes("getUpdates request")) {
+    restarting = true;
+    try {
+      await bot.stopPolling();
+      await bot.deleteWebHook({ drop_pending_updates: true });
+    } catch {}
+    setTimeout(async () => {
+      try { await bot.startPolling(); console.log("[TG] Polling restarted after 409."); }
+      catch (e) { console.error("[TG] startPolling failed:", e?.message || e); }
+      restarting = false;
+    }, 5000);
+  } else if (text.includes("ETIMEDOUT") || err.code === "EFATAL") {
+    restarting = true;
+    try { await bot.stopPolling(); } catch {}
+    setTimeout(async () => {
+      try { await bot.startPolling(); console.log("[TG] Polling restarted after timeout."); }
+      catch (e) { console.error("[TG] startPolling failed:", e?.message || e); }
+      restarting = false;
+    }, 10000);
   }
 });
-startWsConnections();
+
+// === СТАРТ WS/КЭШЕЙ (как было) ===
+startWsConnections();     // убедись, что внутри wsManager WebSocket создаётся с agent (для бирж)
 startCacheUpdater();
+
+// === UI/утилиты (как было) ===
 const mainMenu = {
   reply_markup: {
     keyboard: [
@@ -113,6 +160,8 @@ function makeOnSignal(chatId) {
     catch (e) { console.error("[TG SEND ERROR]", e.message); }
   };
 }
+
+// === HANDLERS (как было) ===
 bot.onText(/\/start/, async (msg) => {
   const id = msg.chat.id;
   const u = await ensureUser(id);
@@ -123,22 +172,26 @@ bot.onText(/\/start/, async (msg) => {
     bot.sendMessage(id, "👋 Привет! Реактивный режим включён.", mainMenu);
   }
 });
+
 bot.on("message", async (msg) => {
   try {
     const id = msg.chat.id;
     if (msg.chat.type !== "private") return;
     const text = (msg.text || "").trim();
     let u = await ensureUser(id);
+
     if (waitingInput.has(id)) {
       const w = waitingInput.get(id);
       waitingInput.delete(id);
       bot.deleteMessage(id, msg.message_id).catch(()=>{});
+
       if (w.field === "auth") {
         if (text.toLowerCase() === SECRET_WORD.toLowerCase()) {
           u.authorized = true; saveUser(id, u);
           return bot.sendMessage(id, "✅ Доступ разрешён!", mainMenu);
         } else return bot.sendMessage(id, "❌ Неверное секретное слово.");
       }
+
       try {
         const value = parseFloat(text.replace(",", "."));
         if (!Number.isFinite(value)) throw new Error("nan");
@@ -150,12 +203,15 @@ bot.on("message", async (msg) => {
         return bot.sendMessage(id, `✅ Обновлено: ${mod}.${field} = ${value}`, mainMenu);
       } catch { return bot.sendMessage(id, "❌ Ошибка: нужно число."); }
     }
+
     if (!u.authorized) return bot.sendMessage(id, "🔐 Введите секретное слово.");
     if (text === "⚙️ Настройки") return renderRootSettings(id);
+
     if (text === "🚀 Начать") {
       if (activeUsers.has(id)) return bot.sendMessage(id, "⏳ Уже запущено.", mainMenu);
       if (u.modules.length === 0) return bot.sendMessage(id, "❌ Нет модулей.");
       if (u.exchanges.length === 0) return bot.sendMessage(id, "❌ Нет бирж.");
+
       const msgStart = await bot.sendMessage(id, "🔎 Реактивный запуск (WS подписки)...");
       registerUser(id, u, makeOnSignal(id));
       await subscribeUserUniverse(id, u);
@@ -167,6 +223,7 @@ bot.on("message", async (msg) => {
         { ...mainMenu, parse_mode: "Markdown" }
       );
     }
+
     if (text === "⛔ Стоп") {
       if (!activeUsers.has(id)) return bot.sendMessage(id, "⏹ Уже остановлено.", mainMenu);
       unregisterUser(id);
@@ -176,6 +233,7 @@ bot.on("message", async (msg) => {
     }
   } catch (e) { console.error("[BOT ERROR]", e.message); }
 });
+
 function renderRootSettings(id) {
   const text = "⚙️ Настройки:";
   const markup = {
@@ -193,11 +251,13 @@ function renderRootSettings(id) {
   };
   bot.sendMessage(id, text, markup);
 }
+
 bot.on("callback_query", async (q) => {
   try {
     const id = q.message.chat.id;
     let u = await ensureUser(id);
     const data = q.data || "";
+
     if (data === "back_main") {
       await safeDeleteMessage(id, q.message.message_id);
       return bot.sendMessage(id, "🏠 Главное меню", mainMenu);
@@ -205,6 +265,7 @@ bot.on("callback_query", async (q) => {
     if (data === "modules")  return renderModules(id, q.message.message_id, u);
     if (data === "exchanges")return renderExchanges(id, q.message.message_id, u);
     if (["sp","pd","div","common"].includes(data)) return renderSettings(id, q.message.message_id, data, u);
+
     if (data.startsWith("toggle_mod_")) {
       const k = data.replace("toggle_mod_", "");
       const i = u.modules.indexOf(k);
@@ -213,6 +274,7 @@ bot.on("callback_query", async (q) => {
       bot.answerCallbackQuery(q.id, { text: "✅ Модули обновлены" });
       return renderModules(id, q.message.message_id, u);
     }
+
     if (data.startsWith("toggle_ex_")) {
       const k = data.replace("toggle_ex_", "");
       const i = u.exchanges.indexOf(k);
@@ -221,6 +283,7 @@ bot.on("callback_query", async (q) => {
       bot.answerCallbackQuery(q.id, { text: "✅ Биржи обновлены" });
       return renderExchanges(id, q.message.message_id, u);
     }
+
     if (data.startsWith("tf_")) {
       const [, mod, tf] = data.split("_");
       if (["sp","pd","div"].includes(mod) && ["5m","15m","1h","4h"].includes(tf)) {
@@ -230,6 +293,7 @@ bot.on("callback_query", async (q) => {
         return renderSettings(id, q.message.message_id, mod, u);
       }
     }
+
     if (data.startsWith("edit_")) {
       const field = data.replace("edit_", "");
       const promptMsg = await bot.sendMessage(id, `💬 Введите число для "${field}":`);
@@ -238,6 +302,7 @@ bot.on("callback_query", async (q) => {
     }
   } catch (e) { console.error("[BOT CB ERROR]", e.message); }
 });
+
 function renderModules(id, msgId, u) {
   const btn = (k) => {
     const name = MODULE_NAMES[k] || k;
@@ -273,7 +338,7 @@ function renderSettings(id, msgId, mod, u) {
   } else if (mod === "pd") {
     inline = [
       [{ text: `📈 Мин. OI (%): ${u.pd.oiPct}`,        callback_data: "edit_pd.oiPct" }],
-      [{ text: `💰 Мин. CVD ($): ${u.pd.cvdUsdMin}`,     callback_data: "edit_pd.cvdUsdMin" }],
+      [{ text: `💰 Мин. CVD ($): ${u.pd.cvdUsdMin}`,   callback_data: "edit_pd.cvdUsdMin" }],
       [{ text: `🕯️ Мин. тело свечи (%): ${u.pd.minBodyPct}`, callback_data: "edit_pd.minBodyPct" }],
       [{ text: `📊 Мин. объём ×: ${u.pd.minVolX}`,     callback_data: "edit_pd.minVolX" }],
       [{ text: `⏱️ Таймфрейм: ${u.perModuleTF.pd}`,    callback_data: "noop" }],
@@ -297,6 +362,8 @@ function renderSettings(id, msgId, mod, u) {
   bot.editMessageText(`${modNames[mod]} — настройки:`, { chat_id: id, message_id: msgId, reply_markup: { inline_keyboard: inline } });
 }
 async function safeDeleteMessage(id, mid) { try { await bot.deleteMessage(id, mid); } catch {} }
+
+// === подписки на вселенную пользователя (как было) ===
 const symbolCache = new Map();
 const CACHE_SYMBOLS_TTL_MS = 30 * 60 * 1000;
 async function getCachedActiveSymbols(ex, minVolumeUsd) {
@@ -331,13 +398,18 @@ async function subscribeUserUniverse(chatId, u) {
   }
 }
 
-// +++ КОД ДЛЯ ХОСТИНГА RENDER (ЧТОБЫ БОТ НЕ "ЗАСЫПАЛ") +++
-const PORT = process.env.PORT || 3000; // Render предоставит свой PORT
+// === Render web-ping (не засыпать) ===
+const PORT = process.env.PORT || 3000;
 const app = express();
-app.get('/', (req, res) => {
-  // Отвечаем на пинг, чтобы Render видел, что мы "живы"
-  res.send('Bot is alive and polling!');
-});
+app.get("/", (_req, res) => res.send("Bot is alive and polling!"));
 app.listen(PORT, () => {
   console.log(`[RENDER] Web-server for uptime pings running on port ${PORT}`);
 });
+
+// аккуратно гасим процесс (Render отправляет SIGTERM на релизах)
+for (const sig of ["SIGINT","SIGTERM"]) {
+  process.on(sig, async () => {
+    try { await bot.stopPolling(); } catch {}
+    process.exit(0);
+  });
+}

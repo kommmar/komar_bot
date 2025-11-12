@@ -1,21 +1,22 @@
-// modules/wsManager.js — ИСПРАВЛЕН "ПИНГ", ВЫЗЫВАВШИЙ ОТКЛЮЧЕНИЕ
+// wsManager.js — версия с прокси (для Украины и Render)
 import WebSocket from "ws";
+import { HttpsProxyAgent } from "https-proxy-agent";
 
-const BINANCE_WSS = "wss://fstream.binance.com/ws"; 
+const PROXY_URL = process.env.PROXY_URL || "";
+const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
+
+const BINANCE_WSS = "wss://fstream.binance.com/ws";
 const BYBIT_WSS   = "wss://stream.bybit.com/v5/public/linear";
 
-const SUB_BATCH_SIZE = 5; // "Вежливые" настройки
-const SUB_BATCH_DELAY_MS = 500; // "Вежливые" настройки
+const SUB_BATCH_SIZE = 5;
+const SUB_BATCH_DELAY_MS = 500;
 
-export const subscriptions = new Map(); 
-const sockets = {
-  binance: new Map(),
-  bybit:   new Map(),
-};
+export const subscriptions = new Map();
+const sockets = { binance: new Map(), bybit: new Map() };
 
 export function tfToMinutes(tf) {
   const s = String(tf).toLowerCase();
-  if (s.includes("5"))  return 5;
+  if (s.includes("5")) return 5;
   if (s.includes("15")) return 15;
   if (s.includes("1h") || s === "60") return 60;
   if (s.includes("4h") || s === "240") return 240;
@@ -34,187 +35,51 @@ function ensureSocketHolder(ex, tf) {
 }
 
 export function startWsConnections() {
-  console.log("[WS] manager ready");
+  console.log("[WS] manager ready (with proxy if set)");
 }
 
-function chunkArray(arr, size) {
-  const chunks = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
-}
-
-// ===== Binance WS (с "дроблением" подписок) =====
-async function subscribeBinanceInBatches(holder, binTf) {
-  const allTopics = [...holder.topics].map(sym => `${sym.toLowerCase()}@kline_${binTf}`);
-  const topicChunks = chunkArray(allTopics, SUB_BATCH_SIZE);
-  
-  console.log(`[WS] Binance ${binTf} subscribing to ${allTopics.length} topics in ${topicChunks.length} batches...`);
-  
-  for (let i = 0; i < topicChunks.length; i++) {
-    const chunk = topicChunks[i];
-    const subMsg = { method: "SUBSCRIBE", params: chunk, id: Date.now() };
-    try {
-      if (holder.ready && holder.ws.readyState === WebSocket.OPEN) {
-        holder.ws.send(JSON.stringify(subMsg));
-      } else {
-         console.warn(`[WS] Binance ${binTf} connection lost during batch subscription.`);
-         break;
-      }
-    } catch (e) {
-      console.warn(`[WS] Binance ${binTf} batch subscribe error:`, e.message);
-    }
-    if (i < topicChunks.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, SUB_BATCH_DELAY_MS));
-    }
-  }
-  console.log(`[WS] Binance ${binTf} batch subscription finished.`);
-}
-
+// ===== Binance =====
 function openBinance(tf) {
   const holder = ensureSocketHolder("binance", tf);
-  if (holder.ws) return holder; 
-  
+  if (holder.ws) return holder;
   const binTf = tfToBinance(tf);
-  
-  holder.ws = new WebSocket(BINANCE_WSS);
+
+  holder.ws = new WebSocket(BINANCE_WSS, { agent: proxyAgent || undefined });
   holder.ready = false;
 
   holder.ws.on("open", () => {
     holder.ready = true;
     holder.lastMsgTs = Date.now();
-    console.log(`[WS] Connected: binance:${binTf}. Topics: ${holder.topics.size}.`);
-    subscribeBinanceInBatches(holder, binTf);
+    console.log(`[WS] Connected: binance:${binTf}`);
+    subscribeBinance(holder, binTf);
   });
 
-  holder.ws.on("message", (raw) => {
-    holder.lastMsgTs = Date.now(); // Cброс таймера при любом сообщении
+  holder.ws.on("message", raw => {
+    holder.lastMsgTs = Date.now();
     try {
-      const data = JSON.parse(raw.toString());
-      if (data.result === null) return; // Игнор ответа на подписку
-      // if (data.pong) return; // data.pong здесь не будет
-
-      const d = data;
-      const e = d?.e;
+      const d = JSON.parse(raw.toString());
       const k = d?.k;
-      if (e === "kline" && k && k.x) {
-        const symbol = String(k.s || "").toUpperCase();
-        const tfStr  = binTf;
+      if (d.e === "kline" && k?.x) {
         const kline = [Number(k.t), Number(k.o), Number(k.h), Number(k.l), Number(k.c), Number(k.v), true];
-        import("./scannerEngine.js").then(m => { if (m.handleKlineUpdate) m.handleKlineUpdate("binance", symbol, tfStr, kline); }).catch(()=>{});
+        import("./scannerEngine.js")
+          .then(m => m.handleKlineUpdate?.("binance", k.s, binTf, kline))
+          .catch(()=>{});
       }
     } catch {}
   });
 
-  holder.ws.on("error", (err) => console.warn(`[WS] Binance error ${binTf}:`, err.message));
-
+  holder.ws.on("error", e => console.warn(`[WS] Binance error ${tf}:`, e.message));
   holder.ws.on("close", () => {
     holder.ready = false;
-    safeClose(holder); 
-    console.warn(`[WS] Binance closed ${binTf}. Reconnecting in 3s...`);
+    safeClose(holder);
+    console.warn(`[WS] Binance closed ${tf}. Reconnecting in 3s...`);
     setTimeout(() => openBinance(tf), 3000);
   });
 
-  if (holder.pingTimer) clearInterval(holder.pingTimer);
   holder.pingTimer = setInterval(() => {
     const idle = Date.now() - holder.lastMsgTs;
-    
-    // +++ ОШИБОЧНЫЙ ПИНГ УДАЛЕН +++
-    // try {
-    //     if (holder.ready && holder.ws.readyState === WebSocket.OPEN) {
-    //         holder.ws.send(JSON.stringify({ method: "PING", id: Date.now() }));
-    //     }
-    // } catch {}
-    // +++ КОНЕЦ ИЗМЕНЕНИЯ +++
-
-    // Оставляем ТОЛЬКО "сторожевой" таймер
-    if (idle > 180000) { // 3 минуты
-      console.warn(`[WS WATCHDOG] No data from binance:${binTf} > 180s. Reconnecting.`);
-      try { holder.ws?.terminate(); } catch {}
-    }
-  }, 20000); // Проверка каждые 20с
-
-  return holder;
-}
-
-// ===== Bybit WS (без изменений, он работал) =====
-async function subscribeBybitInBatches(holder, bybitTf) {
-  const allTopics = [...holder.topics].map(sym => `kline.${bybitTf}.${sym}`);
-  const topicChunks = chunkArray(allTopics, SUB_BATCH_SIZE);
-  
-  console.log(`[WS] Bybit ${bybitTf} subscribing to ${allTopics.length} topics in ${topicChunks.length} batches...`);
-  
-  for (let i = 0; i < topicChunks.length; i++) {
-    const chunk = topicChunks[i];
-    const subMsg = { op: "subscribe", args: chunk };
-    try {
-      if (holder.ready && holder.ws.readyState === WebSocket.OPEN) {
-        holder.ws.send(JSON.stringify(subMsg));
-      } else {
-         console.warn(`[WS] Bybit ${bybitTf} connection lost during batch subscription.`);
-         break;
-      }
-    } catch (e) {
-      console.warn(`[WS] Bybit ${bybitTf} batch subscribe error:`, e.message);
-    }
-    if (i < topicChunks.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, SUB_BATCH_DELAY_MS));
-    }
-  }
-  console.log(`[WS] Bybit ${bybitTf} batch subscription finished.`);
-}
-
-function openBybit(tf) {
-  const holder = ensureSocketHolder("bybit", tf);
-  if (holder.ws) return holder; 
-
-  const bybitTf = tfToBybit(tf);
-
-  holder.ws = new WebSocket(BYBIT_WSS);
-  holder.ready = false;
-
-  holder.ws.on("open", () => {
-    holder.ready = true;
-    holder.lastMsgTs = Date.now();
-    console.log(`[WS] Connected: bybit:${tf}. Topics: ${holder.topics.size}.`);
-    subscribeBybitInBatches(holder, bybitTf);
-  });
-
-  holder.ws.on("message", (raw) => {
-    holder.lastMsgTs = Date.now();
-    try {
-      const msg = JSON.parse(raw.toString());
-      const topic = msg?.topic || "";
-      if (!topic.startsWith("kline.")) return;
-      const parts = topic.split(".");
-      const tfNum = parts[1];
-      const symbol = parts[2];
-      const arr = msg?.data || [];
-      for (const it of arr) {
-        if (it.confirm === true) {
-          const kline = [Number(it.start), Number(it.open), Number(it.high), Number(it.low), Number(it.close), Number(it.volume), true];
-          import("./scannerEngine.js").then(m => { if (m.handleKlineUpdate) m.handleKlineUpdate("bybit", symbol, tfNum, kline); }).catch(()=>{});
-        }
-      }
-    } catch {}
-  });
-
-  holder.ws.on("error", (err) => console.warn(`[WS] Bybit error ${tf}:`, err.message));
-
-  holder.ws.on("close", () => {
-    holder.ready = false;
-    safeClose(holder); 
-    console.warn(`[WS] Bybit closed ${tf}. Reconnecting in 3s...`);
-    setTimeout(() => openBybit(tf), 3000);
-  });
-
-  if (holder.pingTimer) clearInterval(holder.pingTimer);
-  holder.pingTimer = setInterval(() => {
-    const idle = Date.now() - holder.lastMsgTs;
-    // Для Bybit автоматического пинга/понга от 'ws' достаточно
     if (idle > 180000) {
-      console.warn(`[WS WATCHDOG] No data from bybit:${tf} > 180s. Reconnecting.`);
+      console.warn(`[WS WATCHDOG] Binance ${tf} idle >180s, reconnecting`);
       try { holder.ws?.terminate(); } catch {}
     }
   }, 20000);
@@ -222,39 +87,117 @@ function openBybit(tf) {
   return holder;
 }
 
-// (Остальной код файла без изменений)
+async function subscribeBinance(holder, binTf) {
+  const allTopics = [...holder.topics].map(sym => `${sym.toLowerCase()}@kline_${binTf}`);
+  const chunks = [];
+  for (let i = 0; i < allTopics.length; i += SUB_BATCH_SIZE)
+    chunks.push(allTopics.slice(i, i + SUB_BATCH_SIZE));
+  for (const chunk of chunks) {
+    const msg = { method: "SUBSCRIBE", params: chunk, id: Date.now() };
+    try { holder.ws.send(JSON.stringify(msg)); } catch {}
+    await new Promise(r => setTimeout(r, SUB_BATCH_DELAY_MS));
+  }
+}
+
+// ===== Bybit =====
+function openBybit(tf) {
+  const holder = ensureSocketHolder("bybit", tf);
+  if (holder.ws) return holder;
+  const bybitTf = tfToBybit(tf);
+
+  holder.ws = new WebSocket(BYBIT_WSS, { agent: proxyAgent || undefined });
+  holder.ready = false;
+
+  holder.ws.on("open", () => {
+    holder.ready = true;
+    holder.lastMsgTs = Date.now();
+    console.log(`[WS] Connected: bybit:${tf}`);
+    subscribeBybit(holder, bybitTf);
+  });
+
+  holder.ws.on("message", raw => {
+    holder.lastMsgTs = Date.now();
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (!msg?.topic?.startsWith("kline.")) return;
+      const parts = msg.topic.split(".");
+      const tfNum = parts[1];
+      const symbol = parts[2];
+      for (const it of msg.data || []) {
+        if (it.confirm) {
+          const kline = [Number(it.start), Number(it.open), Number(it.high), Number(it.low), Number(it.close), Number(it.volume), true];
+          import("./scannerEngine.js")
+            .then(m => m.handleKlineUpdate?.("bybit", symbol, tfNum, kline))
+            .catch(()=>{});
+        }
+      }
+    } catch {}
+  });
+
+  holder.ws.on("error", e => console.warn(`[WS] Bybit error ${tf}:`, e.message));
+  holder.ws.on("close", () => {
+    holder.ready = false;
+    safeClose(holder);
+    console.warn(`[WS] Bybit closed ${tf}. Reconnecting in 3s...`);
+    setTimeout(() => openBybit(tf), 3000);
+  });
+
+  holder.pingTimer = setInterval(() => {
+    const idle = Date.now() - holder.lastMsgTs;
+    if (idle > 180000) {
+      console.warn(`[WS WATCHDOG] Bybit ${tf} idle >180s, reconnecting`);
+      try { holder.ws?.terminate(); } catch {}
+    }
+  }, 20000);
+
+  return holder;
+}
+
+async function subscribeBybit(holder, tf) {
+  const all = [...holder.topics].map(sym => `kline.${tf}.${sym}`);
+  const chunks = [];
+  for (let i = 0; i < all.length; i += SUB_BATCH_SIZE)
+    chunks.push(all.slice(i, i + SUB_BATCH_SIZE));
+  for (const chunk of chunks) {
+    const msg = { op: "subscribe", args: chunk };
+    try { holder.ws.send(JSON.stringify(msg)); } catch {}
+    await new Promise(r => setTimeout(r, SUB_BATCH_DELAY_MS));
+  }
+}
+
+// ===== Управление подписками =====
 function subscribeTopic(ex, tf, sym) {
   const holder = ensureSocketHolder(ex, tf);
-
-  const upperSym = sym.toUpperCase();
-  if (holder.topics.has(upperSym)) return; 
-  holder.topics.add(upperSym);
+  const s = sym.toUpperCase();
+  if (holder.topics.has(s)) return;
+  holder.topics.add(s);
 
   if (holder.ready) {
     if (ex === "binance") {
-        const binTf = tfToBinance(tf);
-        const subMsg = { method: "SUBSCRIBE", params: [`${sym.toLowerCase()}@kline_${binTf}`], id: Date.now() };
-        try { holder.ws.send(JSON.stringify(subMsg)); } catch {}
+      const binTf = tfToBinance(tf);
+      const subMsg = { method: "SUBSCRIBE", params: [`${sym.toLowerCase()}@kline_${binTf}`], id: Date.now() };
+      try { holder.ws.send(JSON.stringify(subMsg)); } catch {}
     } else {
       const sub = { op: "subscribe", args: [`kline.${tfToBybit(tf)}.${sym.toUpperCase()}`] };
       try { holder.ws.send(JSON.stringify(sub)); } catch {}
     }
   }
 }
+
 function unsubscribeTopic(ex, tf, sym) {
   const holder = ensureSocketHolder(ex, tf);
-  const upperSym = sym.toUpperCase();
-  if (!holder.topics.has(upperSym)) return; 
-  holder.topics.delete(upperSym);
+  const s = sym.toUpperCase();
+  if (!holder.topics.has(s)) return;
+  holder.topics.delete(s);
 
   if (holder.ready) {
-     if (ex === "binance") {
-        const binTf = tfToBinance(tf);
-        const unsubMsg = { method: "UNSUBSCRIBE", params: [`${sym.toLowerCase()}@kline_${binTf}`], id: Date.now() };
-        try { holder.ws.send(JSON.stringify(unsubMsg)); } catch {}
+    if (ex === "binance") {
+      const binTf = tfToBinance(tf);
+      const msg = { method: "UNSUBSCRIBE", params: [`${sym.toLowerCase()}@kline_${binTf}`], id: Date.now() };
+      try { holder.ws.send(JSON.stringify(msg)); } catch {}
     } else {
-      const unsub = { op: "unsubscribe", args: [`kline.${tfToBybit(tf)}.${sym.toUpperCase()}`] };
-      try { holder.ws.send(JSON.stringify(unsub)); } catch {}
+      const msg = { op: "unsubscribe", args: [`kline.${tfToBybit(tf)}.${sym.toUpperCase()}`] };
+      try { holder.ws.send(JSON.stringify(msg)); } catch {}
     }
   }
 }
@@ -267,29 +210,27 @@ function safeClose(holder) {
   holder.ready = false;
 }
 
+// ===== Основная логика управления =====
 export async function manageSubscription(ex, stream, symbol, tf, chatId, enable) {
   const key = keyFor(ex, stream, symbol, tf);
   let obj = subscriptions.get(key);
-  
+
   if (enable) {
     if (!obj) {
       obj = { users: new Set(), count: 0 };
       subscriptions.set(key, obj);
     }
-    
-    const isFirstUserForTf = !sockets[ex].has(tf) || !sockets[ex].get(tf).ws;
-    if(isFirstUserForTf){
-        if(ex === "binance") openBinance(tf);
-        else openBybit(tf);
-    }
+
+    const needSocket = !sockets[ex].has(tf) || !sockets[ex].get(tf).ws;
+    if (needSocket) ex === "binance" ? openBinance(tf) : openBybit(tf);
 
     obj.users.add(chatId);
     obj.count++;
-    subscribeTopic(ex, tf, symbol); 
+    subscribeTopic(ex, tf, symbol);
   } else {
-    if (!obj) return; 
+    if (!obj) return;
     obj.users.delete(chatId);
-    if (obj.count > 0) obj.count--;
+    obj.count = Math.max(0, obj.count - 1);
     if (obj.count === 0) {
       unsubscribeTopic(ex, tf, symbol);
       subscriptions.delete(key);
