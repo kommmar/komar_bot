@@ -1,4 +1,6 @@
+// bot.js — финальная версия для Render (EPARSE fixed, анти-дубли, прокси только для бирж)
 import "dotenv/config";
+import fs from "fs";
 import TelegramBot from "node-telegram-bot-api";
 import express from "express";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -10,6 +12,7 @@ import * as binanceApi from "./api/binance.js";
 import * as bybitApi from "./api/bybit.js";
 import { loadUserSettings, saveUserSettings } from "./modules/userManager.js";
 
+// ===== ENV =====
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const SECRET_WORD = process.env.SECRET_WORD || "komar";
 const PROXY_URL = process.env.PROXY_URL || "";
@@ -19,8 +22,23 @@ if (!TOKEN) {
 }
 const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
 
-// === Telegram Bot ===
+// ===== Лок-файл: защита от нескольких процессов Render =====
+const LOCK_FILE = "/tmp/komar_bot.lock";
+try {
+  if (fs.existsSync(LOCK_FILE)) {
+    console.error("❌ Найдён другой запущенный процесс (lock). Завершаюсь…");
+    process.exit(0);
+  }
+  fs.writeFileSync(LOCK_FILE, String(Date.now()));
+  process.on("exit", () => { try { fs.unlinkSync(LOCK_FILE); } catch {} });
+} catch (e) {
+  console.warn("[LOCK] Не удалось записать lock-файл:", e.message);
+}
+
+// ===== Telegram без прокси (важно для устранения EPARSE) =====
 const bot = new TelegramBot(TOKEN, { polling: true });
+
+// Сбрасываем вебхук и чистим очередь
 (async () => {
   try {
     await bot.deleteWebHook({ drop_pending_updates: true });
@@ -29,20 +47,25 @@ const bot = new TelegramBot(TOKEN, { polling: true });
     console.error("[TG] deleteWebHook error:", e.message);
   }
 })();
-bot.getMe().then(me => console.log(`✅ Bot @${me.username}`));
-// --- Защита от двойного запуска (Render + локальный, или двойной deploy) ---
+
+// Доп. защита: если Telegram уже обслуживает другой polling → выходим
 bot.getUpdates({ limit: 1 }).catch(err => {
-  if (String(err.message).includes("409")) {
-    console.error("❌ Обнаружен другой активный экземпляр бота. Завершение...");
+  if (String(err.message || "").includes("409")) {
+    console.error("❌ Обнаружен другой активный экземпляр (409). Завершаюсь…");
     process.exit(0);
   }
 });
 
+bot.getMe().then(me => console.log(`✅ Bot @${me.username}`)).catch(()=>{});
 
+// Перезапуск polling при сетевых сбоях/409
 let restarting = false;
 bot.on("polling_error", async (err) => {
-  console.error("[POLLING ERROR]", err.message);
+  const msg = String(err?.message || err);
+  console.error("[POLLING ERROR]", msg);
   if (restarting) return;
+
+  // Если 409 — не спорим, просто пробуем мягкий рестарт
   restarting = true;
   try {
     await bot.stopPolling();
@@ -53,16 +76,18 @@ bot.on("polling_error", async (err) => {
       await bot.startPolling();
       console.log("[TG] Polling restarted.");
     } catch (e) {
-      console.error("[TG] Poll restart failed:", e.message);
+      console.error("[TG] Poll restart failed:", e?.message || e);
+    } finally {
+      restarting = false;
     }
-    restarting = false;
   }, 5000);
 });
 
-// === WS + CACHE ===
-startWsConnections(proxyAgent);
+// ===== Старт сканеров/WS (прокси используется внутри модулей бирж и wsManager) =====
+startWsConnections(proxyAgent); // ок, если функция игнорит аргумент
 startCacheUpdater();
 
+// ===== Пользователи/кэш =====
 const userCache = new Map();
 function normalizeUser(u) {
   const D = RAW_DEFAULTS;
@@ -93,6 +118,7 @@ function saveUser(id, u) {
   userCache.set(id, n);
 }
 
+// ===== Меню/UI =====
 const mainMenu = {
   reply_markup: {
     keyboard: [
@@ -105,7 +131,7 @@ const mainMenu = {
 const waitingInput = new Map();
 const activeUsers = new Map();
 
-// === Утилиты ===
+// ===== Утилиты форматирования =====
 const sideEmoji = (s) => (s === "Лонг" ? "🟢" : s === "Шорт" ? "🔴" : "▪️");
 function num(v, d = 2) { const n = Number(v); return Number.isFinite(n) ? n.toFixed(d) : "—"; }
 function pct(v) { const n = Number(v); return Number.isFinite(n) ? (n > 0 ? "+" : "") + n.toFixed(2) + "%" : "—"; }
@@ -150,7 +176,20 @@ function makeOnSignal(chatId) {
     catch (e) { console.error("[TG SEND ERROR]", e.message); }
   };
 }
-// === Обработчики ===
+
+// ===== /start (на всякий) =====
+bot.onText(/^\/start$/, async (msg) => {
+  const id = msg.chat.id;
+  const u = await ensureUser(id);
+  if (!u.authorized) {
+    bot.sendMessage(id, "🔐 Введите секретное слово:");
+    waitingInput.set(id, { field: "auth" });
+  } else {
+    bot.sendMessage(id, "👋 Привет! Реактивный режим включён.", mainMenu);
+  }
+});
+
+// ===== Основной обработчик =====
 bot.on("message", async (msg) => {
   try {
     const id = msg.chat.id;
@@ -158,7 +197,7 @@ bot.on("message", async (msg) => {
     const text = (msg.text || "").trim();
     let u = await ensureUser(id);
 
-    // ожидание ввода числа/секретного слова
+    // ожидаем ввод числа/секретного слова
     if (waitingInput.has(id)) {
       const w = waitingInput.get(id);
       waitingInput.delete(id);
@@ -179,7 +218,7 @@ bot.on("message", async (msg) => {
         if (!Number.isFinite(value)) throw new Error("NaN");
         const [mod, field] = w.field.split(".");
         if (mod === "common") u[field] = value;
-        else if (["sp", "pd", "div"].includes(mod)) u[mod][field] = value;
+        else if (["sp","pd","div"].includes(mod)) u[mod][field] = value;
         else return bot.sendMessage(id, "⚠️ Поле не распознано.");
         saveUser(id, u);
         return bot.sendMessage(id, `✅ Обновлено: ${mod}.${field} = ${value}`, mainMenu);
@@ -189,6 +228,7 @@ bot.on("message", async (msg) => {
     }
 
     if (!u.authorized) return bot.sendMessage(id, "🔐 Введите секретное слово.");
+
     if (text === "⚙️ Настройки") return renderRootSettings(id);
 
     if (text === "🚀 Начать") {
@@ -220,7 +260,7 @@ bot.on("message", async (msg) => {
   }
 });
 
-// === Настройки (UI) ===
+// ===== UI: меню/кнопки =====
 function renderRootSettings(id) {
   const text = "⚙️ Настройки:";
   const markup = {
@@ -282,7 +322,7 @@ bot.on("callback_query", async (q) => {
     }
 
     if (data.startsWith("edit_")) {
-      const field = data.replace("edit_", ""); // например: "pd.minVolX"
+      const field = data.replace("edit_", ""); // напр.: "pd.minVolX"
       const promptMsg = await bot.sendMessage(id, `💬 Введите число для "${field}":`);
       waitingInput.set(id, { field, promptId: promptMsg.message_id });
       return;
@@ -380,7 +420,7 @@ async function safeDeleteMessage(id, mid) {
   try { await bot.deleteMessage(id, mid); } catch {}
 }
 
-// === Символы и подписки ===
+// ===== Символы/подписки =====
 const symbolCache = new Map();
 const CACHE_SYMBOLS_TTL_MS = 30 * 60 * 1000;
 
@@ -416,16 +456,17 @@ async function subscribeUserUniverse(chatId, u) {
   }
 }
 
-// === Express для Render (держим сервис “живым”) ===
+// ===== Express для Render (аптайм) =====
 const PORT = process.env.PORT || 3000;
 const app = express();
 app.get("/", (_req, res) => res.send("Bot is alive and polling!"));
 app.listen(PORT, () => console.log(`[RENDER] Web-server running on port ${PORT}`));
 
-// === Корректное завершение (SIGTERM/SIGINT) ===
+// Корректное завершение контейнера
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, async () => {
     try { await bot.stopPolling(); } catch {}
+    try { fs.existsSync(LOCK_FILE) && fs.unlinkSync(LOCK_FILE); } catch {}
     process.exit(0);
   });
 }
