@@ -36,6 +36,13 @@ function ensureSocketHolder(ex, tf) {
 
 export function startWsConnections() {
   console.log("[WS] manager ready (with proxy if set)");
+  // +++ ДОБАВЛЕННЫЙ ЛОГ ДЛЯ ПРОВЕРКИ ПРОКСИ +++
+  if (PROXY_URL) {
+      // Логируем только IP/домен, чтобы не раскрывать пароль
+      const proxyAddr = PROXY_URL.split('@').pop().split(':')[0]; 
+      console.log(`[WS PROXY] Using proxy for WS: ${proxyAddr}`);
+  }
+  // +++ КОНЕЦ ДОБАВЛЕННОГО ЛОГА +++
 }
 
 // ===== Binance =====
