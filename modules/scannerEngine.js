@@ -1,4 +1,4 @@
-// modules/scannerEngine.js (З ЛОГІКОЮ ПОСТІЙНОГО КЕШУ ТА ВИПРАВЛЕНОЮ DIV)
+// modules/scannerEngine.js (ФІНАЛЬНА ВЕРСІЯ З ВИПРАВЛЕНИМИ ФІЛЬТРАМИ)
 import { GLOBAL, DEFAULTS } from "./config.js";
 import { rsi, sma, macd, klineHistory } from "./indicators.js";
 import * as binanceApi from "../api/binance.js";
@@ -240,7 +240,7 @@ function analyzeDivergenceSmart(kl, oiVal, cvdVal, u) {
   const d = u.div || {};
   const closedKlines = kl.filter(k => k[6] === true); // Використовуємо лише закриті свічки
   
-  if (!closedKlines || closedKlines.length < 25) return null; 
+  if (!closedKlines || closedKlines.length < 25) return null; // Тепер мінімум 25
   const cls = closesArr(closedKlines);
   const rsiSeries = rsi(cls, Number(d.rsiPeriod || 14));
   if (rsiSeries.length === 0) return null;
