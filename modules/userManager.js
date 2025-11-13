@@ -1,4 +1,4 @@
-// modules/userManager.js (Нова версія з MongoDB + Kline History Persistence)
+// modules/userManager.js (ФІНАЛЬНА ВЕРСІЯ З ensureDbConnection)
 import { MongoClient } from "mongodb";
 
 const MONGO_URI = process.env.MONGO_URI;
@@ -9,6 +9,7 @@ if (!MONGO_URI) {
 
 const client = new MongoClient(MONGO_URI);
 let db;
+let dbConnectedPromise; // +++ ВИПРАВЛЕННЯ: Створення Promise для очікування DB +++
 
 // Підключаємось один раз при старті
 async function connectToDb() {
@@ -17,22 +18,27 @@ async function connectToDb() {
     db = client.db("komar_bot_db"); 
     console.log("✅ Connected to MongoDB");
     await db.collection("users").createIndex({ userId: 1 }, { unique: true });
-    // +++ ІНДЕКС ДЛЯ KLINE HISTORY +++
-    // Створюємо індекс для швидкого пошуку свічок за ключем (EX:SYMBOL:TF)
     await db.collection("kline_history").createIndex({ key: 1 }, { unique: true }); 
-    // +++ КІНЕЦЬ ІНДЕКСУ +++
   } catch (e) {
     console.error("❌ MongoDB connection failed:", e.message);
     process.exit(1);
   }
 }
 
-connectToDb();
+dbConnectedPromise = connectToDb(); // Запускаємо, але не чекаємо тут
+
+// +++ ВИПРАВЛЕННЯ: ФУНКЦІЯ ЧЕКАННЯ ПІДКЛЮЧЕННЯ +++
+export async function ensureDbConnection() {
+    if (db) return; // Якщо вже підключено
+    await dbConnectedPromise; // Чекаємо завершення асинхронного підключення
+}
+// +++ КІНЕЦЬ ВИПРАВЛЕННЯ +++
+
 
 // Завантажує користувача ІЛІ створює його
 export async function loadUserSettings(userId, defaults = {}) {
   try {
-    const users = db.collection("users");
+    const users = db.collection("users"); 
     const user = await users.findOne({ userId: String(userId) });
     if (user) {
       return user.settings; 
@@ -63,13 +69,12 @@ export async function saveUserSettings(userId, data) {
   }
 }
 
-// +++ НОВА ФУНКЦІЯ: ЗБЕРЕЖЕННЯ ІСТОРІЇ СВІЧОК +++
-// history: [ [t, o, h, l, c, v, is_final], ... ]
+// ЗБЕРЕЖЕННЯ ІСТОРІЇ СВІЧОК
 export async function saveKlineHistory(key, history) {
     if (!db) return;
     try {
         await db.collection("kline_history").updateOne(
-            { key: key }, // Ключ: EX:SYMBOL:TF (напр., BINANCE:BTCUSDT:5m)
+            { key: key }, 
             { $set: { history: history, ts: Date.now() } },
             { upsert: true }
         );
@@ -78,12 +83,11 @@ export async function saveKlineHistory(key, history) {
     }
 }
 
-// +++ НОВА ФУНКЦІЯ: ЗАВАНТАЖЕННЯ ІСТОРІЇ СВІЧОК +++
+// ЗАВАНТАЖЕННЯ ІСТОРІЇ СВІЧОК
 export async function loadKlineHistory(key) {
     if (!db) return null;
     try {
         const doc = await db.collection("kline_history").findOne({ key: key });
-        // Повертаємо історію, якщо вона не старша за 2 дні 
         if (doc && (Date.now() - doc.ts) < 2 * 24 * 3600 * 1000) {
              return doc.history;
         }
@@ -93,7 +97,6 @@ export async function loadKlineHistory(key) {
         return null;
     }
 }
-// ЦІ ФУНКЦІЇ БІЛЬШЕ НЕ ПОТРІБНІ, АЛЕ МИ ЇХ ЗАЛИШИМО
 export function ensureUserDir() { /* no-op */ }
 export function userFilePath(userId) { /* no-op */ }
 export function listUsers() {
