@@ -1,9 +1,10 @@
-// modules/scannerEngine.js (Новая логика PumpDump + Мульти-Поиск Дивергенций)
+// modules/scannerEngine.js (З ЛОГІКОЮ ПОСТІЙНОГО КЕШУ ТА ВИПРАВЛЕНОЮ DIV)
 import { GLOBAL, DEFAULTS } from "./config.js";
 import { rsi, sma, macd, klineHistory } from "./indicators.js";
 import * as binanceApi from "../api/binance.js";
 import * as bybitApi from "../api/bybit.js";
 import { tfToMinutes, subscriptions } from "./wsManager.js";
+import { loadKlineHistory, saveKlineHistory } from "./userManager.js"; 
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 let pLimit = require("p-limit");
@@ -66,21 +67,45 @@ export async function handleKlineUpdate(exchange, symbol, tf, kline) {
     const tfKey = normalizeTf(exchange, tf);
     const key = `${exchange}:${symbol}:${tfKey}`.toUpperCase();
     const arr = klineHistory.get(key) || [];
-    const norm = [Number(kline[0]), Number(kline[1]), Number(kline[2]), Number(kline[3]), Number(kline[4]), Number(kline[5])];
-    arr.push(norm);
-    if (arr.length > 200) arr.shift();
+    
+    // kline[6] - це is_final/is_closed
+    const isClosed = kline[6] === true; 
+    // Додаємо isClosed як 7-й елемент до нашої внутрішньої структури свічки
+    const norm = [Number(kline[0]), Number(kline[1]), Number(kline[2]), Number(kline[3]), Number(kline[4]), Number(kline[5]), isClosed];
+    
+    // Нова логіка додавання/оновлення:
+    if (isClosed) { 
+        // Свічка закрита: додаємо як новий елемент
+        arr.push(norm); 
+        if (arr.length > 200) arr.shift();
+        
+        // +++ ЗБЕРЕЖЕННЯ ІСТОРІЇ В MONGO DB +++
+        await saveKlineHistory(key, arr); // Зберігаємо лише закриті свічки
+        // +++ КІНЕЦЬ ЗБЕРЕЖЕННЯ +++
+
+    } else {
+        // Свічка відкрита: оновлюємо останню свічку в масиві
+        // Якщо останній елемент вже є відкритою свічкою (isClosed=false), замінюємо його. Інакше додаємо.
+        if (arr.length > 0 && arr[arr.length - 1][6] === false) {
+            arr[arr.length - 1] = norm;
+        } else {
+            arr.push(norm);
+        }
+    }
+    
     klineHistory.set(key, arr);
 
     const oiData = CACHE.OI.get(exchange)?.get(symbol)?.get(tfKey);
     const cvdData = CACHE.CVD.get(exchange)?.get(symbol)?.get(tfKey);
     const oiVal = Number(oiData?.oiPct ?? 0);
     const cvdVal = Number(cvdData?.cvdUsd ?? 0);
-    const oiVolUsd = Number(oiData?.totalOIUsd ?? 0); // Это *Общий* OI, а не дельта
+    const oiVolUsd = Number(oiData?.totalOIUsd ?? 0); 
 
     for (const [chatId, { user, onSignal }] of USERS.entries()) {
       const mods = user.modules.filter(m => (user.perModuleTF?.[m] || "5m") === tfKey);
       if (mods.length === 0) continue;
       for (const mod of mods) {
+        // Аналіз індикаторів проводиться тільки на закритих свічках
         const sig = analyzeModule(mod, arr, oiVal, cvdVal, user, oiVolUsd, symbol, exchange);
         if (sig) {
           onSignal({
@@ -95,7 +120,7 @@ export async function handleKlineUpdate(exchange, symbol, tf, kline) {
               signalTf: tfKey,
               signalActualTf: tfKey,
               signalMode: "RT",
-              oiVolUsd: oiVolUsd, // Передаем Общий OI $ для информации в сигнале
+              oiVolUsd: oiVolUsd, 
             },
           });
         }
@@ -117,8 +142,9 @@ function normalizeTf(exchange, tf) {
   return s;
 }
 
-function volumesArr(kl) { return kl.map(k => Number(k[5])); }
-function closesArr(kl)  { return kl.map(k => Number(k[4])); }
+// Функції тепер фільтрують лише закриті свічки (k[6] === true)
+function volumesArr(kl) { return kl.filter(k => k[6] === true).map(k => Number(k[5])); } 
+function closesArr(kl)  { return kl.filter(k => k[6] === true).map(k => Number(k[4]));} 
 
 function analyzeModule(name, kl, oiVal, cvdVal, u, oiVolUsd = 0, sym = "UNKNOWN", exchange = "binance") {
   try {
@@ -132,9 +158,10 @@ function analyzeModule(name, kl, oiVal, cvdVal, u, oiVolUsd = 0, sym = "UNKNOWN"
 // --- SMART PUMP ---
 function analyzeSmartPump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   const d = u.sp || {};
-  const idx = kl.length - 1;
-  const last = kl[idx];
-  const prev = kl[idx - 1];
+  const closedKlines = kl.filter(k => k[6] === true); // Використовуємо лише закриті свічки
+  const idx = closedKlines.length - 1;
+  const last = closedKlines[idx];
+  const prev = closedKlines[idx - 1];
   if (!last || !prev || oiVal === 0) return null;
   const open = +last[1], close = +last[4];
   const priceChangePct = ((close - open) / open) * 100;
@@ -143,9 +170,10 @@ function analyzeSmartPump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   const isShort = oiVal <= -minOIPct && priceChangePct < 0;
   if (!isLong && !isShort) return null;
 
-  const vol = volumesArr(kl);
-  const cls = closesArr(kl);
-  const volUsd = vol.map((v, i) => (v * cls[i]) / 1e6);
+  const vol = volumesArr(closedKlines);
+  const cls = closesArr(closedKlines);
+  // ВИПРАВЛЕНО: Видалено ділення на 1e6 для стійкості Bybit
+  const volUsd = vol.map((v, i) => (v * cls[i])); 
   const vAvg = sma(volUsd.slice(0, idx), 20);
   const vLast = volUsd[idx];
   const volMult = vAvg ? vLast / vAvg : 1;
@@ -157,8 +185,9 @@ function analyzeSmartPump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
 // --- PUMPDUMP (Новая логика: OI %, CVD $, Body %, Vol x) ---
 function analyzePumpDump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   const d = u.pd || {};
-  const idx = kl.length - 1;
-  const last = kl[idx];
+  const closedKlines = kl.filter(k => k[6] === true); // Використовуємо лише закриті свічки
+  const idx = closedKlines.length - 1;
+  const last = closedKlines[idx];
 
   // 1. Фильтр мин. % изменения OI (Главный триггер)
   const minOIPct = Number(d.oiPct) || 1;
@@ -169,13 +198,13 @@ function analyzePumpDump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   // 2. Фильтр мин. $ CVD
   const minCvdUsd = Number(d.cvdUsdMin) || 0;
   const isCvdLong = cvdVal >= minCvdUsd;
-  const isCvdShort = cvdVal <= -minCvdUsd; // (Например: -150k <= -100k)
+  const isCvdShort = cvdVal <= -minCvdUsd; 
 
   // Определяем направление сигнала по OI и CVD
-  const isPump = isOiLong && isCvdLong; // Памп, если OI > 3% И CVD > 100k
-  const isDump = isOiShort && isCvdShort; // Дамп, если OI < -3% И CVD < -100k
+  const isPump = isOiLong && isCvdLong; 
+  const isDump = isOiShort && isCvdShort; 
 
-  if (!isPump && !isDump) return null; // Если OI и CVD не совпадают, игнорируем
+  if (!isPump && !isDump) return null; 
 
   // 3. Фильтр мин. тела свечи
   const open = +last[1], close = +last[4], high = +last[2], low = +last[3];
@@ -187,9 +216,10 @@ function analyzePumpDump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   if (bodyPct < minBodyPct) return null;
 
   // 4. Фильтр мин. множителя объёма
-  const vol = volumesArr(kl);
-  const cls = closesArr(kl);
-  const volUsd = vol.map((v, i) => (v * cls[i]) / 1e6); // в MUSD
+  const vol = volumesArr(closedKlines);
+  const cls = closesArr(closedKlines);
+  // ВИПРАВЛЕНО: Видалено ділення на 1e6 для стійкості Bybit
+  const volUsd = vol.map((v, i) => (v * cls[i])); 
   const vAvg = sma(volUsd.slice(0, idx), 20);
   const vLast = volUsd[idx];
   const volMult = vAvg ? vLast / vAvg : 1;
@@ -197,72 +227,74 @@ function analyzePumpDump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   if (volMult < minVolX) return null;
 
   // 5. Финальная проверка: направление цены должно совпадать
-  if (isPump && priceChangePct <= 0) return null; // Памп, а свеча красная? Игнор.
-  if (isDump && priceChangePct >= 0) return null; // Дамп, а свеча зеленая? Игнор.
+  if (isPump && priceChangePct <= 0) return null; 
+  if (isDump && priceChangePct >= 0) return null; 
 
   const side = isPump ? "Лонг" : "Шорт";
   return { side, kind: "🚀 PumpDump", price: close, detail: { oi: oiVal, cvd: cvdVal, volMult, bodyPct } };
 }
 
 
-// --- DIVERGENCE (с НОВЫМ МУЛЬТИ-ПОИСКОМ) ---
+// --- DIVERGENCE (з виправленнями) ---
 function analyzeDivergenceSmart(kl, oiVal, cvdVal, u) {
   const d = u.div || {};
-  if (!kl || kl.length < 50) return null; // Требуем больше истории для поиска
-  const cls = closesArr(kl);
-  const rsiSeries = rsi(cls, Number(d.rsiPeriod || 14)); // У вас 9
-  if (rsiSeries.length === 0) return null;
-  const idx = kl.length - 1;
+  const closedKlines = kl.filter(k => k[6] === true); // Використовуємо лише закриті свічки
   
-  // +++ НОВАЯ ЛОГИКА: ПРОВЕРЯЕМ НЕСКОЛЬКО ИНТЕРВАЛОВ +++
-  const lookbacks = [5, 8, 13, 21]; // Проверяем 5, 8, 13 и 21 свечу назад
-  // +++ КОНЕЦ НОВОЙ ЛОГИКИ +++
+  if (!closedKlines || closedKlines.length < 25) return null; 
+  const cls = closesArr(closedKlines);
+  const rsiSeries = rsi(cls, Number(d.rsiPeriod || 14));
+  if (rsiSeries.length === 0) return null;
+  const idx = closedKlines.length - 1;
+  
+  const lookbacks = [5, 8, 13, 21];
 
-  const diff = Number(d.rsiMinDiff || 4); // У вас 2
-  const RSI_OVERSOLD = Number(d.rsiOversold || 30); // У вас 45
-  const RSI_OVERBOUGHT = Number(d.rsiOverbought || 70); // У вас 65
+  const diff = Number(d.rsiMinDiff || 4);
+  const RSI_OVERSOLD = Number(d.rsiOversold || 30);
+  const RSI_OVERBOUGHT = Number(d.rsiOverbought || 70);
   
   let side = null;
   let foundLookback = null;
   let rsiPrevFound = null;
 
-  const priceNow = +kl[idx][4];
+  const priceNow = +closedKlines[idx][4];
   const rsiNow = rsiSeries[idx];
   
-  if (rsiNow === null) return null; // RSI может быть null в начале
+  if (rsiNow === null) return null;
 
-  // +++ НОВЫЙ ЦИКЛ ПОИСКА +++
+  // +++ ЦИКЛ ПОИСКА С ИСПРАВЛЕНИЕМ ЗОНЫ +++
   for (const lookback of lookbacks) {
     const idxPrev = idx - lookback;
-    if (idxPrev < 0) continue; // Недостаточно истории
+    if (idxPrev < 0) continue; 
 
-    const pricePrev = +kl[idxPrev][4];
+    const pricePrev = +closedKlines[idxPrev][4];
     const rsiPrev = rsiSeries[idxPrev];
     
-    if (rsiPrev === null) continue; // RSI может быть null
+    if (rsiPrev === null) continue; 
 
-    // Бычья дивергенция (цена ниже, RSI выше, прошлый RSI был в зоне)
+    // 1. Бычья дивергенция (Лонг): Цена ниже, RSI выше. 
+    // rsiPrev <= RSI_OVERSOLD: Требует, чтобы предыдущий RSI был в зоне перепроданности.
     if (priceNow < pricePrev && rsiNow > rsiPrev + diff && rsiPrev <= RSI_OVERSOLD) {
       side = "Лонг";
       foundLookback = lookback;
       rsiPrevFound = rsiPrev;
-      break; // Нашли, выходим из цикла
+      break; 
     }
     
-    // Медвежья дивергенция (цена выше, RSI ниже, прошлый RSI был в зоне)
+    // 2. Медвежья дивергенция (Шорт): Цена выше, RSI ниже. 
+    // rsiPrev >= RSI_OVERBOUGHT: Требует, чтобы предыдущий RSI был в зоне перекупленности.
     if (priceNow > pricePrev && rsiNow < rsiPrev - diff && rsiPrev >= RSI_OVERBOUGHT) {
       side = "Шорт";
       foundLookback = lookback;
       rsiPrevFound = rsiPrev;
-      break; // Нашли, выходим из цикла
+      break; 
     }
   }
   // +++ КОНЕЦ ЦИКЛА ПОИСКА +++
 
-  if (!side) return null; // Ничего не нашли
+
+  if (!side) return null;
 
   // --- Strict Mode (MACD) ---
-  // Так как у вас "Soft" режим, эта проверка будет пропущена
   const strictMode = String(d.mode || "soft").toLowerCase() === "strict";
   if (strictMode) {
       const { macdLine, signalLine } = macd(cls, d.macdFast || 12, d.macdSlow || 26, d.macdSignal || 9);
@@ -280,8 +312,8 @@ function analyzeDivergenceSmart(kl, oiVal, cvdVal, u) {
   }
   
   // --- volMult для диверов ---
-  const vol = volumesArr(kl);
-  const cls2 = closesArr(kl);
+  const vol = volumesArr(closedKlines);
+  const cls2 = closesArr(closedKlines);
   const volUsdRaw = vol.map((v, i) => v * cls2[i]);
   const vAvg = sma(volUsdRaw.slice(0, idx), 20);
   const vLast = volUsdRaw[idx];
@@ -298,7 +330,10 @@ function analyzeDivergenceSmart(kl, oiVal, cvdVal, u) {
       strictMode,
       rsiNow,
       rsiPrev: rsiPrevFound,
-      lookback: foundLookback, // Добавим для информации, какой интервал сработал
+      lookback: foundLookback,
+      // !!! КРИТИЧНО: Передаємо поточні налаштування для коректного відображення !!!
+      rsiOverbought: RSI_OVERBOUGHT, 
+      rsiOversold: RSI_OVERSOLD,
     },
   };
 }
