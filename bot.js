@@ -1,4 +1,8 @@
+<<<<<<< HEAD
+// bot.js — ФІНАЛЬНА ВЕРСІЯ З УСІМА ВИПРАВЛЕННЯМИ
+=======
 // bot.js — ФИНАЛЬНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЕМ ОШИБКИ 409 CONFLICT
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 import "dotenv/config";
 import fs from "fs";
 import TelegramBot from "node-telegram-bot-api";
@@ -10,8 +14,12 @@ import { startCacheUpdater, registerUser, unregisterUser } from "./modules/scann
 import { DEFAULTS as RAW_DEFAULTS, MODULE_NAMES } from "./modules/config.js";
 import * as binanceApi from "./api/binance.js";
 import * as bybitApi from "./api/bybit.js";
-import { loadUserSettings, saveUserSettings } from "./modules/userManager.js";
+import { loadUserSettings, saveUserSettings, loadKlineHistory, saveKlineHistory } from "./modules/userManager.js"; 
 
+<<<<<<< HEAD
+
+=======
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 // ===== ENV =====
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const SECRET_WORD = process.env.SECRET_WORD || "komar";
@@ -22,6 +30,13 @@ if (!TOKEN) {
 }
 const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
 
+<<<<<<< HEAD
+// +++ ЛОГ ДЛЯ ПЕРЕВІРКИ ПРОКСІ +++
+if (proxyAgent) {
+    console.log(`[PROXY] ✅ Agent created for: ${PROXY_URL.split('@').pop().split(':')[0]}`);
+} else {
+    console.log("[PROXY] ❌ Agent not created (PROXY_URL is empty).");
+=======
 // ===== 1. Лок-файл: Защита от нескольких процессов Render (Возвращено) =====
 // Бот завершится, если увидит, что файл уже существует, и Render запустит его снова.
 const LOCK_FILE = "/tmp/komar_bot.lock";
@@ -34,12 +49,37 @@ try {
   process.on("exit", () => { try { fs.unlinkSync(LOCK_FILE); } catch {} });
 } catch (e) {
   console.warn("[LOCK] Не удалось записать lock-файл:", e.message);
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
+}
+// +++ КІНЕЦЬ ЛОГА +++
+
+<<<<<<< HEAD
+// ===== 1. Лок-файл: Захист від кількох процесів Render (Виправлено для Windows) =====
+const LOCK_FILE = "/tmp/komar_bot.lock";
+try {
+  // Використовуємо прапор 'wx' для атомарної перевірки/створення
+  fs.writeFileSync(LOCK_FILE, process.pid.toString(), { flag: 'wx' }); 
+  process.on("exit", () => { try { fs.unlinkSync(LOCK_FILE); } catch {} });
+} catch (e) {
+  // EEXIST: файл існує, бот запущений деінде. Завершуємо роботу.
+  if (e.code === 'EEXIST') {
+      console.error(`[LOCK] ❌ Найдён другой запущенный процесс (PID ${fs.readFileSync(LOCK_FILE, 'utf8')}). Завершаюсь…`);
+      process.exit(1); 
+  }
+  // ENOENT (на Windows) або інші помилки запису: Логуємо попередження, але продовжуємо.
+  console.warn(`[LOCK] ⚠️ Не удалось записать lock-файл, продолжаю работу: ${e.message}`);
 }
 
+// ===== 2. Telegram Bot Ініціалізація =====
+const bot = new TelegramBot(TOKEN, { polling: true });
+
+// Скидаємо вебхук і чистимо чергу
+=======
 // ===== 2. Telegram Bot Инициализация =====
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // Сбрасываем вебхук и чистим очередь
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 (async () => {
   try {
     await bot.deleteWebHook({ drop_pending_updates: true });
@@ -49,7 +89,11 @@ const bot = new TelegramBot(TOKEN, { polling: true });
   }
 })();
 
+<<<<<<< HEAD
+// Доп. захист при старті
+=======
 // Доп. защита (Возвращено): если Telegram уже обслуживает другой polling → выходим
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 bot.getUpdates({ limit: 1 }).catch(err => {
   if (String(err.message || "").includes("409")) {
     console.error("❌ Обнаружен другой активный экземпляр (409) при старте. Завершаюсь…");
@@ -59,15 +103,23 @@ bot.getUpdates({ limit: 1 }).catch(err => {
 
 bot.getMe().then(me => console.log(`✅ Bot @${me.username}`)).catch(()=>{});
 
+<<<<<<< HEAD
+// ===== 3. КРИТИЧНЕ ВИПРАВЛЕННЯ ЛОГІКИ POLLING_ERROR (409) =====
+=======
 // ===== 3. ИСПРАВЛЕННАЯ ЛОГИКА ОШИБКИ POLLING_ERROR =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 let restarting = false;
 bot.on("polling_error", async (err) => {
   const msg = String(err?.message || err);
   console.error("[POLLING ERROR]", msg);
   if (restarting) return;
     
+<<<<<<< HEAD
+  // 🛑 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если 409 Conflict, принудительно выходим.
+=======
   // 🛑 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если 409 Conflict, то НЕ перезапускаемся, а принудительно выходим.
   // Это предотвратит бесконечный цикл "Polling restarted"
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
   if (msg.includes("409")) {
     console.error("❌ 409 Conflict: Обнаружен другой экземпляр. Принудительно завершаю процесс.");
     try { await bot.stopPolling(); } catch {}
@@ -76,7 +128,11 @@ bot.on("polling_error", async (err) => {
   }
   // --------------------------------------------------------------------------
 
+<<<<<<< HEAD
+  // Якщо помилка інша (наприклад, мережевий збій), пробуємо м'який рестарт
+=======
   // Если ошибка другая (например, сетевой сбой), пробуем мягкий рестарт
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
   restarting = true;
   try {
     await bot.stopPolling();
@@ -94,11 +150,19 @@ bot.on("polling_error", async (err) => {
   }, 5000);
 });
 
+<<<<<<< HEAD
+// ===== 4. Старт сканерів/WS =====
+startWsConnections(proxyAgent);
+startCacheUpdater();
+
+// ===== 5. Користувачі/кеш (без змін) =====
+=======
 // ===== 4. Старт сканеров/WS =====
 startWsConnections(proxyAgent);
 startCacheUpdater();
 
 // ===== 5. Пользователи/кэш =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 const userCache = new Map();
 function normalizeUser(u) {
   const D = RAW_DEFAULTS;
@@ -129,7 +193,11 @@ function saveUser(id, u) {
   userCache.set(id, n);
 }
 
+<<<<<<< HEAD
+// ===== 6. Меню/UI (Без змін) =====
+=======
 // ===== 6. Меню/UI (Без изменений) =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 const mainMenu = {
   reply_markup: {
     keyboard: [
@@ -142,6 +210,108 @@ const mainMenu = {
 const waitingInput = new Map();
 const activeUsers = new Map();
 
+<<<<<<< HEAD
+// ===== 7. Утилити форматування (З НОВИМ КРАСИВИМ ФОРМАТОМ) =====
+const sideEmoji = (s) => (s === "Лонг" ? "🟢" : s === "Шорт" ? "🔴" : "▪️");
+const num = (v, d = 2) => { const n = Number(v); return Number.isFinite(n) ? n.toFixed(d) : "—"; };
+const pct = (v) => { const n = Number(v); return Number.isFinite(n) ? (n > 0 ? "+" : "") + n.toFixed(2) + "%" : "—"; };
+const money = (n) => { const v = Number(n); const a = Math.abs(v); if (a >= 1e6) return (v/1e6).toFixed(2) + "M$"; if (a >= 1e3) return (v/1e3).toFixed(1) + "K$"; return v.toFixed(0) + "$"; };
+
+
+function formatSignal(sig) {
+  const ex = String(sig.exchange || "").toUpperCase();
+  const tf = sig.detail?.signalActualTf || sig.detail?.signalTf || "";
+  const kind = sig.kind, side = sig.side, d = sig.detail || {};
+  const kindName = kind.includes("Divergence") ? `ДИВЕРГЕНЦИЯ (${d.strictMode ? 'MACD' : 'RSI'})` : kind.toUpperCase();
+  const title = `${sideEmoji(side)} ${side.toUpperCase()} • ${kindName} • ${ex} • ${sig.symbol} • ${tf}`;
+  
+  // ===== 1. Базові лінії (завжди) =====
+  let baseLines = [
+    `Цена закрытия:       \`${num(sig.price, 6)}\``,
+    `Объем ×SMA20:        \`${num(d.volMult, 2)}×\``,
+    `OI Дельта:           \`${pct(d.oi || 0)}\` (${money(d.oiVolUsd || 0)})`,
+    `CVD Дельта:          \`${money(d.cvd || 0)}\``,
+  ];
+
+  let specificDetails = [];
+  
+  // ===== 2. Специфічні деталі для Дивергенції =====
+  if (kind.includes("Divergence")) {
+      const mode = d.strictMode ? "Strict (MACD)" : "Soft (RSI)";
+      
+      const rsiDirection = (side === 'Лонг' ? `Цена ↓ (Падает) vs RSI ↑ (Растет)` : `Цена ↑ (Растет) vs RSI ↓ (Падает)`);
+      
+      // !!! КРИТИЧНЕ ВИПРАВЛЕННЯ: Використовуємо передані параметри для зони !!!
+      const rsiOversoldParam = d.rsiOversold || 30;
+      const rsiOverboughtParam = d.rsiOverbought || 70;
+      const zoneRequirement = (side === 'Лонг' 
+          ? `Перепроданность < ${rsiOversoldParam}` 
+          : `Перекупленность > ${rsiOverboughtParam}`
+      );
+      // !!! КІНЕЦЬ ВИПРАВЛЕННЯ !!!
+
+      specificDetails = [
+          `\n*📊 ДЕТАЛИ ДИВЕРГЕНЦИИ (${mode}):*`,
+          `Направление:         ${rsiDirection}`,
+          `RSI текущий:         \`${num(d.rsiNow, 1)}\` (Был: ${num(d.rsiPrev, 1)})`,
+          `Сработало на периоде: \`${d.lookback} свечей назад\``,
+          `Требование зоны:     ${zoneRequirement}`
+      ];
+      
+      // +++ ДОДАТКОВИЙ БЛОК ДЛЯ MACD (STRICT MODE) +++
+      if (d.strictMode) {
+          specificDetails.push(
+              `\n*🧩 MACD ПОДТВЕРЖДЕНИЕ:*`,
+              `Пересечение:         ✅ (MACD ${side === 'Лонг' ? 'под' : 'над'} линией 0)`,
+          );
+      }
+      // +++ КІНЕЦЬ БЛОКУ MACD +++
+  }
+
+  // ===== 3. Блок OI/CVD та Аналіз Ризику =====
+  const oi = Number(d.oi), cvd = Number(d.cvd);
+  const oiThreshold = 0.05; 
+  const cvdThreshold = 1000; 
+  const isOiLong = oi > oiThreshold;
+  const isOiShort = oi < -oiThreshold;
+  const isCvdLong = cvd > cvdThreshold;
+  const isCvdShort = cvd < -cvdThreshold;
+  let comment = "ℹ️ Направление OI/CVD не определено.";
+  
+  if (side === "Лонг") {
+      if (isOiLong && isCvdLong) comment = "🟢 Лонг подтвержден! OI и CVD растут вместе → сильный бычий импульс.";
+      else if (isCvdLong && !isOiLong) comment = "⚠️ Ложный рост (CVD↑, OI не растет). Возможен Short Squeeze.";
+      else if (isOiLong && !isCvdLong) comment = "⚠️ Слабый Лонг (OI↑, CVD не растет). Нет поддержки покупателей.";
+      else comment = "❌ Лонг не подтвержден. OI и CVD не показывают сильной активности.";
+  } else if (side === "Шорт") {
+      if (isOiShort && isCvdShort) comment = "🔴 Шорт подтвержден! OI и CVD падают вместе → сильный медвежий импульс.";
+      else if (isCvdShort && !isOiShort) comment = "⚠️ Ложное падение (CVD↓, OI не падает). Возможен Long Squeeze.";
+      else if (isOiShort && !isCvdShort) comment = "⚠️ Слабый Шорт (OI↓, CVD не падает). Нет поддержки продавцов.";
+      else comment = "❌ Шорт не подтвержден. OI и CVD не показывают сильной активности.";
+  }
+  
+  // Об'єднуємо всі частини
+  const allLines = [...baseLines, ...specificDetails];
+
+  // Фінальна збірка
+  return `*${title}*\n---\n\n*💰 ТЕКУЩИЕ ПАРАМЕТРЫ:*\n${baseLines.join("\n")}\n\n${specificDetails.join("\n")}\n\n*АНАЛИЗ РИСКА:*\n${comment}`;
+}
+
+
+function makeOnSignal(chatId) {
+  const dedup = new Map();
+  return async (sig) => {
+    const key = `${sig.exchange}:${sig.symbol}:${sig.kind}:${sig.detail?.signalTf}`;
+    const last = dedup.get(key) || 0;
+    if (Date.now() - last < 2000) return;
+    dedup.set(key, Date.now());
+    try { await bot.sendMessage(chatId, formatSignal(sig), { parse_mode: "Markdown" }); }
+    catch (e) { console.error("[TG SEND ERROR]", e.message); }
+  };
+}
+
+// ===== 8. Обробники повідомлень (Без змін) =====
+=======
 // ===== 7. Утилиты форматирования (Без изменений) =====
 const sideEmoji = (s) => (s === "Лонг" ? "🟢" : s === "Шорт" ? "🔴" : "▪️");
 function num(v, d = 2) { const n = Number(v); return Number.isFinite(n) ? n.toFixed(d) : "—"; }
@@ -189,6 +359,7 @@ function makeOnSignal(chatId) {
 }
 
 // ===== 8. Обработчики сообщений (Без изменений) =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 bot.onText(/^\/start$/, async (msg) => {
   const id = msg.chat.id;
   const u = await ensureUser(id);
@@ -207,7 +378,11 @@ bot.on("message", async (msg) => {
     const text = (msg.text || "").trim();
     let u = await ensureUser(id);
 
+<<<<<<< HEAD
+    // очікуємо введення числа/секретного слова
+=======
     // ожидаем ввод числа/секретного слова
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
     if (waitingInput.has(id)) {
       const w = waitingInput.get(id);
       waitingInput.delete(id);
@@ -270,7 +445,11 @@ bot.on("message", async (msg) => {
   }
 });
 
+<<<<<<< HEAD
+// ===== 9. UI (Виправлено: Інтерактивний вибір режиму) =====
+=======
 // ===== 9. UI (Без изменений) =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 function renderRootSettings(id) {
   const text = "⚙️ Настройки:";
   const markup = {
@@ -289,6 +468,30 @@ function renderRootSettings(id) {
   bot.sendMessage(id, text, markup);
 }
 
+// Функція для відображення меню режимів DIV
+function renderDivModeMenu(id, msgId, u) {
+    const current = String(u.div.mode || "soft").toLowerCase();
+    
+    const kb = [
+        [{ 
+            text: `${current === 'soft' ? '✅ ' : ''}🪶 Soft (RSI)`, 
+            callback_data: "set_div_mode_soft" 
+        }],
+        [{ 
+            text: `${current === 'strict' ? '✅ ' : ''}🧩 Strict (MACD)`, 
+            callback_data: "set_div_mode_strict" 
+        }],
+        [{ text: "⬅️ Назад", callback_data: "div" }] // Повернення до налаштувань Div
+    ];
+    
+    bot.editMessageText("🎯 Выберите режим анализа Дивергенции:", {
+        chat_id: id, 
+        message_id: msgId,
+        reply_markup: { inline_keyboard: kb }
+    });
+}
+
+
 bot.on("callback_query", async (q) => {
   try {
     const id = q.message.chat.id;
@@ -303,6 +506,49 @@ bot.on("callback_query", async (q) => {
     if (data === "exchanges") return renderExchanges(id, q.message.message_id, u);
     if (["sp","pd","div","common"].includes(data)) return renderSettings(id, q.message.message_id, data, u);
 
+<<<<<<< HEAD
+    // --- НОВІ ОБРОБНИКИ ДЛЯ РЕЖИМУ DIV ---
+    if (data === "div_mode_menu") return renderDivModeMenu(id, q.message.message_id, u);
+
+    if (data.startsWith("set_div_mode_")) {
+        const mode = data.replace("set_div_mode_", ""); // 'soft' або 'strict'
+        u.div.mode = mode;
+        saveUser(id, u);
+        bot.answerCallbackQuery(q.id, { text: `✅ Режим: ${mode.toUpperCase()}` });
+        // Повертаємо користувача до головних налаштувань Div
+        return renderSettings(id, q.message.message_id, 'div', u); 
+    }
+    // --- КІНЕЦЬ НОВИХ ОБРОБНИКІВ ---
+
+    if (data.startsWith("toggle_mod_")) {
+      const k = data.replace("toggle_mod_", "");
+      const i = u.modules.indexOf(k);
+      if (i > -1) u.modules.splice(i, 1); else u.modules.push(k);
+      saveUser(id, u);
+      bot.answerCallbackQuery(q.id, { text: "✅ Модули обновлены" });
+      return renderModules(id, q.message.message_id, u);
+    }
+
+    if (data.startsWith("toggle_ex_")) {
+      const k = data.replace("toggle_ex_", "");
+      const i = u.exchanges.indexOf(k);
+      if (i > -1) u.exchanges.splice(i, 1); else u.exchanges.push(k);
+      saveUser(id, u);
+      bot.answerCallbackQuery(q.id, { text: "✅ Биржи обновлены" });
+      return renderExchanges(id, q.message.message_id, u);
+    }
+
+    if (data.startsWith("tf_")) {
+      const [, mod, tf] = data.split("_");
+      if (["sp","pd","div"].includes(mod) && ["5m","15m","1h","4h"].includes(tf)) {
+        u.perModuleTF[mod] = tf;
+        saveUser(id, u);
+        bot.answerCallbackQuery(q.id, { text: `✅ TF: ${tf}` });
+        return renderSettings(id, q.message.message_id, mod, u);
+    }
+    }
+
+=======
     if (data.startsWith("toggle_mod_")) {
       const k = data.replace("toggle_mod_", "");
       const i = u.modules.indexOf(k);
@@ -331,6 +577,7 @@ bot.on("callback_query", async (q) => {
       }
     }
 
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
     if (data.startsWith("edit_")) {
       const field = data.replace("edit_", ""); // напр.: "pd.minVolX"
       const promptMsg = await bot.sendMessage(id, `💬 Введите число для "${field}":`);
@@ -402,8 +649,15 @@ function renderSettings(id, msgId, mod, u) {
       ...tfButtons("pd")
     ];
   } else if (mod === "div") {
+<<<<<<< HEAD
+    // !!! ОНОВЛЕНИЙ БЛОК ДЛЯ DIV !!!
+    const currentMode = String(u.div.mode || "soft").toLowerCase() === "strict";
+    inline = [
+      [{ text: `Режим: ${currentMode ? "🧩 Strict (MACD)" : "🪶 Soft (RSI)"}`, callback_data: "div_mode_menu" }], 
+=======
     inline = [
       [{ text: `Режим: ${String(u.div.mode||"soft").toLowerCase()==="strict" ? "🧩 Strict (MACD)" : "🪶 Soft (RSI)"}`, callback_data: "edit_div.mode" }],
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
       [{ text: `RSI Период: ${u.div.rsiPeriod}`,           callback_data: "edit_div.rsiPeriod" }],
       [{ text: `RSI Мин. разница: ${u.div.rsiMinDiff}`,    callback_data: "edit_div.rsiMinDiff" }],
       [{ text: `RSI Перекупленность: ${u.div.rsiOverbought}`, callback_data: "edit_div.rsiOverbought" }],
@@ -412,6 +666,10 @@ function renderSettings(id, msgId, mod, u) {
       [{ text: `⏱️ Таймфрейм: ${u.perModuleTF.div}`,       callback_data: "noop" }],
       ...tfButtons("div")
     ];
+<<<<<<< HEAD
+    // !!! КІНЕЦЬ ОНОВЛЕНОГО БЛОКУ !!!
+=======
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
   } else if (mod === "common") {
     inline = [
       [{ text: `💰 Мин. объём ($): ${u.minVolumeUsd}`, callback_data: "edit_common.minVolumeUsd" }],
@@ -430,7 +688,11 @@ async function safeDeleteMessage(id, mid) {
   try { await bot.deleteMessage(id, mid); } catch {}
 }
 
+<<<<<<< HEAD
+// ===== 10. Символи і підписки (Логіка завантаження кешу) =====
+=======
 // ===== 10. Символы и подписки (Без изменений) =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 const symbolCache = new Map();
 const CACHE_SYMBOLS_TTL_MS = 30 * 60 * 1000;
 
@@ -448,6 +710,10 @@ async function getCachedActiveSymbols(ex, minVolumeUsd) {
   }
 }
 
+<<<<<<< HEAD
+// +++ ОНОВЛЕНА ЛОГІКА: ЗАВАНТАЖЕННЯ ІСТОРІЇ З DB АБО REST +++
+=======
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 async function subscribeUserUniverse(chatId, u) {
   const tfs = new Set(u.modules.map(m => u.perModuleTF[m]));
   const tfList = [...tfs];
@@ -458,13 +724,53 @@ async function subscribeUserUniverse(chatId, u) {
       continue;
     }
     console.log(`[SUB] ${ex.toUpperCase()} queuing ${symsAll.length} symbols on TF: ${tfList.join(", ")}`);
+<<<<<<< HEAD
+    
+    const api = ex === "binance" ? binanceApi : bybitApi; 
+    const indicatorsModule = await import("./modules/indicators.js"); 
+
     for (const sym of symsAll) {
       for (const tf of tfList) {
+        const key = `${ex}:${sym}:${tf}`.toUpperCase();
+
+        // 1. Пытаемся загрузить историю из MongoDB
+        const history = await loadKlineHistory(key);
+
+        if (history && history.length > 0) {
+            // История найдена в кеше, используем её
+            indicatorsModule.klineHistory.set(key, history);
+            console.log(`[HIST] Loaded ${history.length} klines for ${sym}:${tf} from DB.`);
+        } else {
+            // 2. Истории нет (первый запуск): делаем REST-запрос
+            try {
+              // Получаем 200 свечей
+              const klines = await api.getKlines(sym, tf, 200); 
+              if (klines && klines.length > 0) {
+                  // Преобразуем свечи: [t, o, h, l, c, v, is_final=true]
+                  const normKlines = klines.map(k => [Number(k[0]), Number(k[1]), Number(k[2]), Number(k[3]), Number(k[4]), Number(k[5]), true]);
+                  indicatorsModule.klineHistory.set(key, normKlines);
+                  console.log(`[HIST] Fetched ${klines.length} klines for ${sym}:${tf} via REST.`);
+                  // Сохраняем свежую историю в DB для следующего раза
+                  await saveKlineHistory(key, normKlines);
+              }
+            } catch (e) {
+               console.warn(`[HIST] Failed to fetch klines for ${sym}:${tf} via REST: ${e.message}`);
+            }
+        }
+        
+=======
+    for (const sym of symsAll) {
+      for (const tf of tfList) {
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
         manageSubscription(ex, "kline", sym, tf, chatId, true);
       }
     }
   }
 }
+<<<<<<< HEAD
+// +++ КІНЕЦЬ ОНОВЛЕНОЇ ЛОГІКИ +++
+=======
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 
 // ===== 11. Express для Render (аптайм) =====
 const PORT = process.env.PORT || 3000;
@@ -472,11 +778,19 @@ const app = express();
 app.get("/", (_req, res) => res.send("Bot is alive and polling!"));
 app.listen(PORT, () => console.log(`[RENDER] Web-server running on port ${PORT}`));
 
+<<<<<<< HEAD
+// ===== 12. Коректне завершення (SIGTERM/SIGINT) =====
+=======
 // ===== 12. Корректное завершение (SIGTERM/SIGINT) =====
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, async () => {
     try { await bot.stopPolling(); } catch {}
     try { fs.existsSync(LOCK_FILE) && fs.unlinkSync(LOCK_FILE); } catch {} // Чистим лок-файл
     process.exit(0);
   });
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> f613cc36c55d381bb1bd1405b220b594db628e31
