@@ -1,4 +1,4 @@
-// modules/userManager.js (Новая версия с MongoDB)
+// modules/userManager.js (Нова версія з MongoDB + Kline History Persistence)
 import { MongoClient } from "mongodb";
 
 const MONGO_URI = process.env.MONGO_URI;
@@ -10,76 +10,92 @@ if (!MONGO_URI) {
 const client = new MongoClient(MONGO_URI);
 let db;
 
-// Подключаемся один раз при старте
+// Підключаємось один раз при старті
 async function connectToDb() {
   try {
     await client.connect();
-    // Вы можете назвать базу как угодно. komarbot.bxegrwv.mongodb.net - это хост,
-    // а komar_bot_db - это имя самой Базы Данных внутри
     db = client.db("komar_bot_db"); 
     console.log("✅ Connected to MongoDB");
-    // Создаем индекс для быстрого поиска
     await db.collection("users").createIndex({ userId: 1 }, { unique: true });
+    // +++ ІНДЕКС ДЛЯ KLINE HISTORY +++
+    // Створюємо індекс для швидкого пошуку свічок за ключем (EX:SYMBOL:TF)
+    await db.collection("kline_history").createIndex({ key: 1 }, { unique: true }); 
+    // +++ КІНЕЦЬ ІНДЕКСУ +++
   } catch (e) {
     console.error("❌ MongoDB connection failed:", e.message);
     process.exit(1);
   }
 }
 
-// Запускаем подключение
 connectToDb();
 
-// Загружает пользователя ИЛИ создает его, если его нет
+// Завантажує користувача ІЛІ створює його
 export async function loadUserSettings(userId, defaults = {}) {
   try {
     const users = db.collection("users");
-    
-    // 1. Пытаемся найти пользователя
     const user = await users.findOne({ userId: String(userId) });
-
     if (user) {
-      return user.settings; // Нашли - возвращаем
+      return user.settings; 
     }
-
-    // 2. Не нашли - создаем нового
-    // Сбрасываем 'authorized' для безопасности при первом создании
     const newSettings = { ...defaults, authorized: false }; 
     await users.insertOne({ 
       userId: String(userId), 
       settings: newSettings 
     });
-    
     return newSettings;
-
   } catch (e) {
     console.warn(`[MongoDB] Error loading user ${userId}: ${e.message}`);
-    return { ...defaults }; // В случае ошибки, возвращаем дефолт
+    return { ...defaults }; 
   }
 }
 
-// Сохраняет пользователя
+// Зберігає користувача
 export async function saveUserSettings(userId, data) {
   try {
     const users = db.collection("users");
-    
-    // $set - обновит только поля,
-    // upsert: true - создаст, если не найдет
     await users.updateOne(
       { userId: String(userId) },
       { $set: { settings: data } },
       { upsert: true }
     );
-
   } catch (e) {
     console.warn(`[MongoDB] Error saving user ${userId}: ${e.message}`);
   }
 }
 
-// Эти функции нам больше не нужны, но мы можем их оставить как заглушки
+// +++ НОВА ФУНКЦІЯ: ЗБЕРЕЖЕННЯ ІСТОРІЇ СВІЧОК +++
+// history: [ [t, o, h, l, c, v, is_final], ... ]
+export async function saveKlineHistory(key, history) {
+    if (!db) return;
+    try {
+        await db.collection("kline_history").updateOne(
+            { key: key }, // Ключ: EX:SYMBOL:TF (напр., BINANCE:BTCUSDT:5m)
+            { $set: { history: history, ts: Date.now() } },
+            { upsert: true }
+        );
+    } catch (e) {
+        console.warn(`[MongoDB] Error saving kline history ${key}: ${e.message}`);
+    }
+}
+
+// +++ НОВА ФУНКЦІЯ: ЗАВАНТАЖЕННЯ ІСТОРІЇ СВІЧОК +++
+export async function loadKlineHistory(key) {
+    if (!db) return null;
+    try {
+        const doc = await db.collection("kline_history").findOne({ key: key });
+        // Повертаємо історію, якщо вона не старша за 2 дні 
+        if (doc && (Date.now() - doc.ts) < 2 * 24 * 3600 * 1000) {
+             return doc.history;
+        }
+        return null;
+    } catch (e) {
+        console.warn(`[MongoDB] Error loading kline history ${key}: ${e.message}`);
+        return null;
+    }
+}
+// ЦІ ФУНКЦІЇ БІЛЬШЕ НЕ ПОТРІБНІ, АЛЕ МИ ЇХ ЗАЛИШИМО
 export function ensureUserDir() { /* no-op */ }
 export function userFilePath(userId) { /* no-op */ }
-
-// Эта функция теперь тоже сложнее, пока сделаем заглушку
 export function listUsers() {
   console.warn("listUsers() is not fully supported in MongoDB mode yet.");
   return [];
