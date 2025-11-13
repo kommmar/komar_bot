@@ -27,7 +27,12 @@ export async function getKlines(symbol, interval = "15", limit = 200) {
       params: { category: "linear", symbol, interval, limit },
       headers: { "User-Agent": "Mozilla/5.0" }
     });
-    return res.data?.result?.list || [];
+    const list = res.data?.result?.list || [];
+    // +++ КРИТИЧНЕ ВИПРАВЛЕННЯ: Сортування Bybit +++
+    // Bybit повертає свічки від найновішої до найстарішої, 
+    // але для індикаторів потрібен порядок від найстарішої до найновішої.
+    return list.reverse(); 
+    // +++ КІНЕЦЬ ВИПРАВЛЕННЯ +++
   } catch (e) {
     console.warn(`Bybit Klines error (${symbol}): ${e.message}`);
     return [];
@@ -68,12 +73,14 @@ export async function fetchCVD(symbol, timeframeMin) {
     });
     const kl = r.data?.result?.list || [];
     if (!kl.length) return { cvdUsd: 0 };
-    const k = kl[0];
+    // Примітка: Для CVD ми беремо найновішу свічку, яка є першою в списку Bybit.
+    const k = kl[0]; 
     const o = parseFloat(k[1]);
     const c = parseFloat(k[4]);
     const v = parseFloat(k[5]);
     const mid = (o + c) / 2;
-    return { cvdUsd: ((c - o) / o) * v * mid };
+    // Формула CVD: (close - open) / open * volume * mid_price 
+    return { cvdUsd: ((c - o) / o) * v * mid }; 
   } catch (e) {
     console.warn(`Bybit CVD fetch error (${symbol}): ${e.message}`);
     return { cvdUsd: 0 };
