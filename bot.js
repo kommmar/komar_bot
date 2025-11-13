@@ -1,4 +1,4 @@
-// bot.js — ФІНАЛЬНА ВЕРСІЯ З УСІМА ВИПРАВЛЕННЯМИ ТА КЕШЕМ MONGO
+// bot.js — ФІНАЛЬНА ВЕРСІЯ З ВИПРАВЛЕННЯМ ASYNC DB ТА ЛОГІКОЮ LOCK-ФАЙЛА
 import "dotenv/config";
 import fs from "fs";
 import TelegramBot from "node-telegram-bot-api";
@@ -10,8 +10,8 @@ import { startCacheUpdater, registerUser, unregisterUser } from "./modules/scann
 import { DEFAULTS as RAW_DEFAULTS, MODULE_NAMES } from "./modules/config.js";
 import * as binanceApi from "./api/binance.js";
 import * as bybitApi from "./api/bybit.js";
-// +++ ІМПОРТ НОВИХ ФУНКЦІЙ КЕШУ +++
-import { loadUserSettings, saveUserSettings, loadKlineHistory, saveKlineHistory } from "./modules/userManager.js"; 
+// +++ ІМПОРТ ensureDbConnection +++
+import { loadUserSettings, saveUserSettings, loadKlineHistory, saveKlineHistory, ensureDbConnection } from "./modules/userManager.js"; 
 // +++ КІНЕЦЬ ІМПОРТУ +++
 
 
@@ -79,16 +79,14 @@ bot.on("polling_error", async (err) => {
   console.error("[POLLING ERROR]", msg);
   if (restarting) return;
     
-  // 🛑 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если 409 Conflict, принудительно выходим.
-  if (msg.includes("409")) {
-    console.error("❌ 409 Conflict: Обнаружен другой экземпляр. Принудительно завершаю процесс.");
+  if (msg.includes("409") || msg.includes("499")) { // Додаємо 499
+    console.error("❌ Conflict: Обнаружен другой экземпляр. Принудительно завершаю процесс.");
     try { await bot.stopPolling(); } catch {}
     process.exit(1); 
     return;
   }
   // --------------------------------------------------------------------------
 
-  // Якщо помилка інша (наприклад, мережевий збій), пробуємо м'який рестарт
   restarting = true;
   try {
     await bot.stopPolling();
@@ -110,7 +108,7 @@ bot.on("polling_error", async (err) => {
 startWsConnections(proxyAgent);
 startCacheUpdater();
 
-// ===== 5. Користувачі/кеш (без змін) =====
+// ===== 5. Користувачі/кеш (Змінено: Додано очікування DB) =====
 const userCache = new Map();
 function normalizeUser(u) {
   const D = RAW_DEFAULTS;
@@ -128,7 +126,11 @@ function normalizeUser(u) {
     authorized: !!u?.authorized,
   };
 }
+
 async function ensureUser(id) {
+  // !!! КРИТИЧНО: ЧЕКАЄМО ПІДКЛЮЧЕННЯ ДО DB !!!
+  await ensureDbConnection(); 
+  
   if (userCache.has(id)) return userCache.get(id);
   let u = await loadUserSettings(id, RAW_DEFAULTS);
   u = normalizeUser(u);
@@ -136,9 +138,12 @@ async function ensureUser(id) {
   return u;
 }
 function saveUser(id, u) {
-  const n = normalizeUser(u);
-  saveUserSettings(id, n);
-  userCache.set(id, n);
+  // !!! КРИТИЧНО: ЧЕКАЄМО ПІДКЛЮЧЕННЯ ДО DB !!!
+  ensureDbConnection().then(() => {
+    const n = normalizeUser(u);
+    saveUserSettings(id, n);
+    userCache.set(id, n);
+  }).catch(e => console.error("[DB SAVE ERROR]:", e.message));
 }
 
 // ===== 6. Меню/UI (Без змін) =====
@@ -565,6 +570,9 @@ async function subscribeUserUniverse(chatId, u) {
     
     const api = ex === "binance" ? binanceApi : bybitApi; 
     const indicatorsModule = await import("./modules/indicators.js"); 
+    
+    // !!! КРИТИЧНО: ЧЕКАЄМО ПІДКЛЮЧЕННЯ DB ПЕРЕД ВИКЛИКОМ loadKlineHistory !!!
+    await ensureDbConnection(); 
 
     for (const sym of symsAll) {
       for (const tf of tfList) {
@@ -574,7 +582,6 @@ async function subscribeUserUniverse(chatId, u) {
         const history = await loadKlineHistory(key);
 
         if (history && history.length > 0) {
-            // История найдена в кеше, используем её
             indicatorsModule.klineHistory.set(key, history);
             console.log(`[HIST] Loaded ${history.length} klines for ${sym}:${tf} from DB.`);
         } else {
