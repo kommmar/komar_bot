@@ -1,4 +1,4 @@
-// wsManager.js — версия с прокси (для Украины и Render)
+// wsManager.js — ИСПРАВЛЕННАЯ ВЕРСИЯ (с корректной передачей isClosed)
 import WebSocket from "ws";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
@@ -61,19 +61,25 @@ function openBinance(tf) {
     subscribeBinance(holder, binTf);
   });
 
+  // +++ ИСПРАВЛЕННЫЙ ОБРАБОТЧИК BINANCE +++
   holder.ws.on("message", raw => {
     holder.lastMsgTs = Date.now();
     try {
       const d = JSON.parse(raw.toString());
       const k = d?.k;
-      if (d.e === "kline" && k?.x) {
-        const kline = [Number(k.t), Number(k.o), Number(k.h), Number(k.l), Number(k.c), Number(k.v), true];
+      // 1. Проверяем только наличие kline (убрали k?.x)
+      if (d.e === "kline" && k) { 
+        // 2. Берем НАСТОЯЩИЙ флаг (k.x - это 'is_closed' у Binance)
+        const isClosed = k.x === true; 
+        // 3. Передаем этот флаг в массиве
+        const kline = [Number(k.t), Number(k.o), Number(k.h), Number(k.l), Number(k.c), Number(k.v), isClosed]; 
         import("./scannerEngine.js")
           .then(m => m.handleKlineUpdate?.("binance", k.s, binTf, kline))
           .catch(()=>{});
       }
     } catch {}
   });
+  // +++ КОНЕЦ ИСПРАВЛЕНИЯ +++
 
   holder.ws.on("error", e => console.warn(`[WS] Binance error ${tf}:`, e.message));
   holder.ws.on("close", () => {
@@ -122,6 +128,7 @@ function openBybit(tf) {
     subscribeBybit(holder, bybitTf);
   });
 
+  // +++ ИСПРАВЛЕННЫЙ ОБРАБОТЧИК BYBIT +++
   holder.ws.on("message", raw => {
     holder.lastMsgTs = Date.now();
     try {
@@ -131,15 +138,18 @@ function openBybit(tf) {
       const tfNum = parts[1];
       const symbol = parts[2];
       for (const it of msg.data || []) {
-        if (it.confirm) {
-          const kline = [Number(it.start), Number(it.open), Number(it.high), Number(it.low), Number(it.close), Number(it.volume), true];
-          import("./scannerEngine.js")
-            .then(m => m.handleKlineUpdate?.("bybit", symbol, tfNum, kline))
-            .catch(()=>{});
-        }
+        // 1. Убрали if(it.confirm)
+        // 2. Берем НАСТОЯЩИЙ флаг (it.confirm - это 'is_closed' у Bybit)
+        const isClosed = it.confirm === true;
+        // 3. Передаем этот флаг в массиве
+        const kline = [Number(it.start), Number(it.open), Number(it.high), Number(it.low), Number(it.close), Number(it.volume), isClosed];
+        import("./scannerEngine.js")
+          .then(m => m.handleKlineUpdate?.("bybit", symbol, tfNum, kline))
+          .catch(()=>{});
       }
     } catch {}
   });
+  // +++ КОНЕЦ ИСПРАВЛЕНИЯ +++
 
   holder.ws.on("error", e => console.warn(`[WS] Bybit error ${tf}:`, e.message));
   holder.ws.on("close", () => {
