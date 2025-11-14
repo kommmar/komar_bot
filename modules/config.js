@@ -18,11 +18,11 @@ export const DEFAULTS = {
   },
 
   sp: {
-    oiPlusPct: 0.02 // 2%
+    oiPlusPct: 3 // 2%
   },
 
   pd: {
-    oiPct: 0.05,
+    oiPct: 3,
     // +++ ЛОГИКА ИЗМЕНЕНА +++
     // oiUsdMin: 500000, // УДАЛЕНО
     cvdUsdMin: 100000, // ДОБАВЛЕНО (Мин. $ CVD)
