@@ -16,11 +16,14 @@ const sockets = { binance: new Map(), bybit: new Map() };
 
 export function tfToMinutes(tf) {
   const s = String(tf).toLowerCase();
-  if (s.includes("5")) return 5;
+  
+  // МЕНЯЕМ ПОРЯДОК: Сначала 15, потом 5
   if (s.includes("15")) return 15;
+  if (s.includes("5")) return 5;
+  
   if (s.includes("1h") || s === "60") return 60;
   if (s.includes("4h") || s === "240") return 240;
-  return 5;
+  return 5; // Оставляем 5 по умолчанию, если ничего не найдено
 }
 function tfToBinance(tf) { const m = tfToMinutes(tf); return m === 60 ? "1h" : m === 240 ? "4h" : `${m}m`; }
 function tfToBybit(tf)   { const m = tfToMinutes(tf); return m.toString(); }
