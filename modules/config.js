@@ -1,12 +1,10 @@
-// modules/config.js (Финальная версия для WebSockets)
+// modules/config.js — ФИНАЛЬНАЯ ВЕРСИЯ (Обновленные настройки SP)
 
 export const GLOBAL = {
-  // SCAN_PERIOD_MS УДАЛЕН - теперь используется WebSockets
   MAX_SYMBOLS_PER_EXCHANGE: 300, 
   MAX_SIGNALS_PER_PASS: 16 
 };
 
-// modules/config.js
 export const DEFAULTS = {
   exchanges: ["binance", "bybit"],
   modules: ["sp", "pd", "div"],
@@ -17,16 +15,19 @@ export const DEFAULTS = {
     div: "15m"
   },
 
+  // === НАСТРОЙКИ SMART PUMP 2.0 ===
   sp: {
-    oiPlusPct: 3 // 2%
+    oiPlusPct: 2.0,     // Мин. рост OI (как и было)
+    minPricePct: 0.8,   // НОВОЕ: Мин. % движения цены (фильтр шума)
+    maxPricePct: 4.0,   // НОВОЕ: Макс. % движения (фильтр хаев/FOMO)
+    minVolX: 1.5,       // НОВОЕ: Текущий объем должен быть в X раз выше среднего
+    strictCvd: false    // НОВОЕ: Требовать подтверждение CVD (Вкл/Выкл)
   },
+  // ===============================
 
   pd: {
     oiPct: 3,
-    // +++ ЛОГИКА ИЗМЕНЕНА +++
-    // oiUsdMin: 500000, // УДАЛЕНО
-    cvdUsdMin: 100000, // ДОБАВЛЕНО (Мин. $ CVD)
-    // +++ КОНЕЦ ИЗМЕНЕНИЯ +++
+    cvdUsdMin: 100000, // Мин. $ CVD
     minBodyPct: 0.3,
     minVolX: 2.0
   },
@@ -48,7 +49,6 @@ export const DEFAULTS = {
   authorized: true,
   realtime: true
 };
-
 
 export const MODULE_NAMES = {
   sp: "⚡ Smart Pump",
