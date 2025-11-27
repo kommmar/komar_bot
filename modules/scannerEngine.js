@@ -221,6 +221,9 @@ function analyzePumpDump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
   const idx = closedKlines.length - 1;
   const last = closedKlines[idx];
 
+  // ✅ ИСПРАВЛЕНО: Проверка на существование last перед доступом к свойствам
+  if (!last) return null;
+
   const minOIPct = Number(d.oiPct) || 1;
   const isOiLong = oiVal >= minOIPct;
   const isOiShort = oiVal <= -minOIPct;
@@ -235,6 +238,7 @@ function analyzePumpDump(kl, oiVal, cvdVal, u, oiVolUsd = 0) {
 
   if (!isPump && !isDump) return null; 
 
+  // Теперь доступ безопасен
   const open = +last[1], close = +last[4], high = +last[2], low = +last[3];
   const priceChangePct = ((close - open) / open) * 100;
   const minBodyPct = Number(d.minBodyPct) || 20;
